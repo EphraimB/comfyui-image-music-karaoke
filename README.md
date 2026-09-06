@@ -193,7 +193,7 @@ The Director creates the music style, tempo, key, section lyrics, visual scenes,
 
 ## Reference images
 
-- Click **+ Add Image** for every source asset.
+- In the left-side **Reference Images** node, click **+ Add Image** for every source asset.
 - Choose an image and describe who or what it contains and how the Director may use it.
 - Give identity instructions explicitly, such as “Main performer; preserve face, glasses, hair, and clothing across chorus scenes.”
 - Use **Remove** to delete an entry. No image is required.
@@ -202,7 +202,7 @@ References are uploaded to ComfyUI's input directory and passed as actual pixel-
 
 ## Sound effects
 
-- Click **+ Add Sound Effect** for each effect.
+- In the left-side **Sound Effects** node, click **+ Add Sound Effect** for each effect.
 - Upload WAV, MP3, FLAC, M4A, AAC, OGG, or Opus audio, or leave the file empty and describe a sound to generate.
 - Add optional placement/use instructions such as “quietly after the first chorus” or “twice during the outro.”
 - Expand **Advanced timing and level** for occurrence, generated-duration, and gain controls.

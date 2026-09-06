@@ -106,16 +106,22 @@ function button(label, onClick, kind = "normal") {
   });
 }
 
-function installMediaEditor(node) {
-  const rawWidget = node.widgets?.find((widget) => widget.name === "media_inputs_json");
+function hideStorageWidget(widget) {
+  widget.type = "hidden";
+  widget.hidden = true;
+  widget.computeSize = () => [0, -4];
+  for (const target of [widget.inputEl, widget.element]) {
+    if (target?.style) target.style.display = "none";
+  }
+}
+
+function installMediaEditor(node, kind) {
+  const widgetName = kind === "references" ? "references_json" : "sound_effects_json";
+  const rawWidget = node.widgets?.find((widget) => widget.name === widgetName);
   if (!rawWidget || node.karaokeMediaEditor) return;
 
-  const legacyInputs = new Set(["reference_images", "sound_effects", "image", "sfx_audio"]);
-  for (let index = (node.inputs?.length || 0) - 1; index >= 0; index -= 1) {
-    if (legacyInputs.has(node.inputs[index].name)) node.removeInput(index);
-  }
-
   let state = parseMediaState(rawWidget.value);
+  hideStorageWidget(rawWidget);
   const originalIndex = node.widgets.indexOf(rawWidget);
   node.widgets.splice(originalIndex, 1);
 
@@ -132,120 +138,122 @@ function installMediaEditor(node) {
 
   const render = () => {
     root.replaceChildren();
-    root.append(element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;" }, [
-      element("strong", { text: `Reference Images (${state.references.length})`, style: "font:700 14px sans-serif;" }),
-      button("+ Add Image", () => {
-        state.references.push({ id: crypto.randomUUID(), filename: "", instruction: "" });
-        render(); dirty();
-      }, "add"),
-    ]));
-    if (!state.references.length) {
-      root.append(element("div", { text: "No reference images. Visuals will be generated from the song plan.", style: "padding:8px;color:#94a3b8;font:12px sans-serif;" }));
-    }
-
-    state.references.forEach((item, index) => {
-      const fileName = element("span", {
-        text: item.original_name || item.filename || "No image selected",
-        style: "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#cbd5e1;font:12px sans-serif;",
-      });
-      const choose = button(item.filename ? "Replace Image" : "Choose Image", () => {
-        choose.disabled = true;
-        choose.textContent = "Uploading…";
-        chooseFile("image/png,image/jpeg,image/webp,image/bmp,image/tiff", async (file) => {
-          try {
-            Object.assign(item, await uploadAsset(file, "image_music_karaoke/references"));
-            render(); dirty();
-          } catch (error) {
-            choose.disabled = false;
-            choose.textContent = item.filename ? "Replace Image" : "Choose Image";
-            alert(`Image upload failed: ${error.message}`);
-          }
-        });
-      });
-      const card = element("div", { style: "display:grid;gap:8px;padding:10px;border:1px solid #334155;border-radius:8px;background:#111827;" }, [
-        element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;" }, [
-          element("strong", { text: `Image ${index + 1}`, style: "font:700 13px sans-serif;" }),
-          button("Remove", () => { state.references.splice(index, 1); render(); dirty(); }, "remove"),
-        ]),
-        element("div", { style: "display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;" }, [choose, fileName]),
-      ]);
-      if (item.filename) {
-        card.append(element("img", { src: assetURL(item), alt: fileName.textContent,
-          style: "width:100%;max-height:180px;object-fit:contain;border-radius:6px;background:#020617;" }));
-      }
-      card.append(field("Who or what is shown, and how should this image be used?",
-        textArea(item.instruction, "Example: Main character. Preserve their identity and use them in chorus scenes.", (value) => { item.instruction = value; dirty(); }, 3)));
-      root.append(card);
-    });
-
-    root.append(element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:4px;" }, [
-      element("strong", { text: `Sound Effects (${state.sound_effects.length})`, style: "font:700 14px sans-serif;" }),
-      button("+ Add Sound Effect", () => {
-        state.sound_effects.push({ id: crypto.randomUUID(), filename: "", description: "", placement: "", occurrences: "automatic", duration: 4, gain_db: -18 });
-        render(); dirty();
-      }, "add"),
-    ]));
-    if (!state.sound_effects.length) {
-      root.append(element("div", { text: "No sound effects. The song can run with this list empty.", style: "padding:8px;color:#94a3b8;font:12px sans-serif;" }));
-    }
-
-    state.sound_effects.forEach((item, index) => {
-      const fileName = element("span", {
-        text: item.original_name || item.filename || "No audio selected — use the description below",
-        style: "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#cbd5e1;font:12px sans-serif;",
-      });
-      const choose = button(item.filename ? "Replace Audio" : "Upload Audio", () => {
-        choose.disabled = true;
-        choose.textContent = "Uploading…";
-        chooseFile("audio/wav,audio/mpeg,audio/mp3,audio/flac,audio/mp4,audio/aac,audio/ogg,audio/opus", async (file) => {
-          try {
-            Object.assign(item, await uploadAsset(file, "image_music_karaoke/sound_effects"));
-            render(); dirty();
-          } catch (error) {
-            choose.disabled = false;
-            choose.textContent = item.filename ? "Replace Audio" : "Upload Audio";
-            alert(`Audio upload failed: ${error.message}`);
-          }
-        });
-      });
-      const fileRow = element("div", { style: "display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;" }, [choose, fileName]);
-      if (item.filename) {
-        fileRow.append(button("Clear Audio", () => {
-          delete item.filename; delete item.subfolder; delete item.type; delete item.original_name;
+    if (kind === "references") {
+      root.append(element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;" }, [
+        element("strong", { text: `Reference Images (${state.references.length})`, style: "font:700 14px sans-serif;" }),
+        button("+ Add Image", () => {
+          state.references.push({ id: crypto.randomUUID(), filename: "", instruction: "" });
           render(); dirty();
-        }));
-      }
-      const card = element("div", { style: "display:grid;gap:8px;padding:10px;border:1px solid #334155;border-radius:8px;background:#111827;" }, [
-        element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;" }, [
-          element("strong", { text: `Sound Effect ${index + 1}`, style: "font:700 13px sans-serif;" }),
-          button("Remove", () => { state.sound_effects.splice(index, 1); render(); dirty(); }, "remove"),
-        ]), fileRow,
-      ]);
-      if (item.filename) {
-        card.append(element("audio", { src: assetURL(item), controls: true, preload: "metadata", style: "width:100%;height:34px;" }));
-      }
-      card.append(
-        field("Sound description (or a label for uploaded audio)",
-          textArea(item.description, "Example: distant train horn", (value) => { item.description = value; dirty(); }, 2)),
-        field("Optional placement / use instructions",
-          textArea(item.placement, "Example: after the first chorus, quietly in the distance; leave blank for automatic placement", (value) => { item.placement = value; dirty(); }, 2)),
-      );
-      const advanced = element("details", {}, [element("summary", { text: "Advanced timing and level", style: "cursor:pointer;color:#94a3b8;font:12px sans-serif;" })]);
-      advanced.append(element("div", { style: "display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;" }, [
-        field("Occurrences", textInput(item.occurrences || "automatic", "automatic", (value) => { item.occurrences = value; dirty(); })),
-        field("Generated seconds", textInput(item.duration ?? 4, "4", (value) => { item.duration = Number(value) || 4; dirty(); }, "number")),
-        field("Gain dB", textInput(item.gain_db ?? -18, "-18", (value) => { item.gain_db = Number(value); dirty(); }, "number")),
+        }, "add"),
       ]));
-      card.append(advanced);
-      root.append(card);
-    });
+      if (!state.references.length) {
+        root.append(element("div", { text: "No reference images. Visuals will be generated from the song plan.", style: "padding:8px;color:#94a3b8;font:12px sans-serif;" }));
+      }
+      state.references.forEach((item, index) => {
+        const fileName = element("span", {
+          text: item.original_name || item.filename || "No image selected",
+          style: "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#cbd5e1;font:12px sans-serif;",
+        });
+        const choose = button(item.filename ? "Replace Image" : "Choose Image", () => {
+          choose.disabled = true;
+          choose.textContent = "Uploading…";
+          chooseFile("image/png,image/jpeg,image/webp,image/bmp,image/tiff", async (file) => {
+            try {
+              Object.assign(item, await uploadAsset(file, "image_music_karaoke/references"));
+              render(); dirty();
+            } catch (error) {
+              choose.disabled = false;
+              choose.textContent = item.filename ? "Replace Image" : "Choose Image";
+              alert(`Image upload failed: ${error.message}`);
+            }
+          });
+        });
+        const card = element("div", { style: "display:grid;gap:8px;padding:10px;border:1px solid #334155;border-radius:8px;background:#111827;" }, [
+          element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;" }, [
+            element("strong", { text: `Image ${index + 1}`, style: "font:700 13px sans-serif;" }),
+            button("Remove", () => { state.references.splice(index, 1); render(); dirty(); }, "remove"),
+          ]),
+          element("div", { style: "display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;" }, [choose, fileName]),
+        ]);
+        if (item.filename) {
+          card.append(element("img", { src: assetURL(item), alt: fileName.textContent,
+            style: "width:100%;max-height:180px;object-fit:contain;border-radius:6px;background:#020617;" }));
+        }
+        card.append(field("Who or what is shown, and how should this image be used?",
+          textArea(item.instruction, "Example: Main character. Preserve their identity and use them in chorus scenes.", (value) => { item.instruction = value; dirty(); }, 3)));
+        root.append(card);
+      });
+    } else {
+      root.append(element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;" }, [
+        element("strong", { text: `Sound Effects (${state.sound_effects.length})`, style: "font:700 14px sans-serif;" }),
+        button("+ Add Sound Effect", () => {
+          state.sound_effects.push({ id: crypto.randomUUID(), filename: "", description: "", placement: "", occurrences: "automatic", duration: 4, gain_db: -18 });
+          render(); dirty();
+        }, "add"),
+      ]));
+      if (!state.sound_effects.length) {
+        root.append(element("div", { text: "No sound effects. The song can run with this list empty.", style: "padding:8px;color:#94a3b8;font:12px sans-serif;" }));
+      }
+      state.sound_effects.forEach((item, index) => {
+        const fileName = element("span", {
+          text: item.original_name || item.filename || "No audio selected — use the description below",
+          style: "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#cbd5e1;font:12px sans-serif;",
+        });
+        const choose = button(item.filename ? "Replace Audio" : "Upload Audio", () => {
+          choose.disabled = true;
+          choose.textContent = "Uploading…";
+          chooseFile("audio/wav,audio/mpeg,audio/mp3,audio/flac,audio/mp4,audio/aac,audio/ogg,audio/opus", async (file) => {
+            try {
+              Object.assign(item, await uploadAsset(file, "image_music_karaoke/sound_effects"));
+              render(); dirty();
+            } catch (error) {
+              choose.disabled = false;
+              choose.textContent = item.filename ? "Replace Audio" : "Upload Audio";
+              alert(`Audio upload failed: ${error.message}`);
+            }
+          });
+        });
+        const fileRow = element("div", { style: "display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;" }, [choose, fileName]);
+        if (item.filename) {
+          fileRow.append(button("Clear Audio", () => {
+            delete item.filename; delete item.subfolder; delete item.type; delete item.original_name;
+            render(); dirty();
+          }));
+        }
+        const card = element("div", { style: "display:grid;gap:8px;padding:10px;border:1px solid #334155;border-radius:8px;background:#111827;" }, [
+          element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;" }, [
+            element("strong", { text: `Sound Effect ${index + 1}`, style: "font:700 13px sans-serif;" }),
+            button("Remove", () => { state.sound_effects.splice(index, 1); render(); dirty(); }, "remove"),
+          ]), fileRow,
+        ]);
+        if (item.filename) {
+          card.append(element("audio", { src: assetURL(item), controls: true, preload: "metadata", style: "width:100%;height:34px;" }));
+        }
+        card.append(
+          field("Sound description (or a label for uploaded audio)",
+            textArea(item.description, "Example: distant train horn", (value) => { item.description = value; dirty(); }, 2)),
+          field("Optional placement / use instructions",
+            textArea(item.placement, "Example: after the first chorus, quietly in the distance; leave blank for automatic placement", (value) => { item.placement = value; dirty(); }, 2)),
+        );
+        const advanced = element("details", {}, [element("summary", { text: "Advanced timing and level", style: "cursor:pointer;color:#94a3b8;font:12px sans-serif;" })]);
+        advanced.append(element("div", { style: "display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;" }, [
+          field("Occurrences", textInput(item.occurrences || "automatic", "automatic", (value) => { item.occurrences = value; dirty(); })),
+          field("Generated seconds", textInput(item.duration ?? 4, "4", (value) => { item.duration = Number(value) || 4; dirty(); }, "number")),
+          field("Gain dB", textInput(item.gain_db ?? -18, "-18", (value) => { item.gain_db = Number(value); dirty(); }, "number")),
+        ]));
+        card.append(advanced);
+        root.append(card);
+      });
+    }
   };
 
-  editorWidget = node.addDOMWidget("media_inputs_json", "karaoke_media_editor", root, {
+  editorWidget = node.addDOMWidget(widgetName, "karaoke_media_editor", root, {
     serialize: true,
     hideOnZoom: false,
     getValue() {
-      return JSON.stringify(state);
+      return JSON.stringify(kind === "references"
+        ? { version: 1, references: state.references }
+        : { version: 1, sound_effects: state.sound_effects });
     },
     setValue(value) {
       state = parseMediaState(value);
@@ -265,17 +273,32 @@ function installMediaEditor(node) {
     render,
   };
   render();
-  node.setSize([Math.max(node.size[0], 680), Math.max(node.size[1], 1180)]);
+  node.setSize([Math.max(node.size[0], 520), Math.max(node.size[1], 720)]);
+}
+
+function hideLegacyPlannerMedia(node) {
+  const widget = node.widgets?.find((item) => item.name === "media_inputs_json");
+  if (!widget) return;
+  hideStorageWidget(widget);
 }
 
 app.registerExtension({
   name: "local.ImageMusicKaraoke",
   async beforeRegisterNodeDef(nodeType, nodeData) {
+    if (nodeData.name === "KaraokeReferenceImagesInput" || nodeData.name === "KaraokeSoundEffectsInput") {
+      const originalCreated = nodeType.prototype.onNodeCreated;
+      nodeType.prototype.onNodeCreated = function () {
+        const result = originalCreated?.apply(this, arguments);
+        installMediaEditor(this, nodeData.name === "KaraokeReferenceImagesInput" ? "references" : "sound_effects");
+        return result;
+      };
+      return;
+    }
     if (nodeData.name === "ImageSongPlan") {
       const originalCreated = nodeType.prototype.onNodeCreated;
       nodeType.prototype.onNodeCreated = function () {
         const result = originalCreated?.apply(this, arguments);
-        installMediaEditor(this);
+        hideLegacyPlannerMedia(this);
         return result;
       };
       return;

@@ -83,6 +83,8 @@ def _save_audio(audio, path):
 
 
 MEDIA_INPUTS_DEFAULT = '{"references":[],"sound_effects":[]}'
+REFERENCE_INPUTS_DEFAULT = '{"version":1,"references":[]}'
+SFX_INPUTS_DEFAULT = '{"version":1,"sound_effects":[]}'
 
 
 def _parse_media_inputs(value):
@@ -170,6 +172,55 @@ def _materialize_media_inputs(value, reference_dir, sfx_dir):
     return references, effects
 
 
+def _merge_dynamic_media_inputs(value, reference_media=None, sfx_media=None):
+    """Overlay connected UI-node lists onto the legacy combined document."""
+    references, effects = _parse_media_inputs(value)
+    if reference_media is not None:
+        references, _unused = _parse_media_inputs(reference_media)
+    if sfx_media is not None:
+        _unused, effects = _parse_media_inputs(sfx_media)
+    return json.dumps({"version": 1, "references": references,
+                       "sound_effects": effects}, ensure_ascii=False)
+
+
+class KaraokeReferenceImagesInput:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "references_json": ("STRING", {"multiline": True, "default": REFERENCE_INPUTS_DEFAULT,
+                "tooltip": "Managed by the + Add Image editor."}),
+        }}
+
+    RETURN_TYPES = ("KARAOKE_REFERENCE_INPUTS",)
+    RETURN_NAMES = ("reference_media",)
+    FUNCTION = "collect"
+    CATEGORY = "audio/Image Music Karaoke/Director inputs"
+    DESCRIPTION = "Variable-length reference image picker for the Karaoke Director."
+
+    def collect(self, references_json):
+        references, _effects = _parse_media_inputs(references_json)
+        return (json.dumps({"version": 1, "references": references}, ensure_ascii=False),)
+
+
+class KaraokeSoundEffectsInput:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "sound_effects_json": ("STRING", {"multiline": True, "default": SFX_INPUTS_DEFAULT,
+                "tooltip": "Managed by the + Add Sound Effect editor."}),
+        }}
+
+    RETURN_TYPES = ("KARAOKE_SFX_INPUTS",)
+    RETURN_NAMES = ("sfx_media",)
+    FUNCTION = "collect"
+    CATEGORY = "audio/Image Music Karaoke/Director inputs"
+    DESCRIPTION = "Variable-length uploaded or described sound-effect picker for the Karaoke Director."
+
+    def collect(self, sound_effects_json):
+        _references, effects = _parse_media_inputs(sound_effects_json)
+        return (json.dumps({"version": 1, "sound_effects": effects}, ensure_ascii=False),)
+
+
 class KaraokeReferenceImage:
     @classmethod
     def INPUT_TYPES(cls):
@@ -241,6 +292,8 @@ class ImageSongPlan:
             "media_inputs_json": ("STRING", {"multiline": True, "default": MEDIA_INPUTS_DEFAULT,
                 "tooltip": "Managed by the + Add Image / + Add Sound Effect editor."}),
         }, "optional": {
+            "reference_media": ("KARAOKE_REFERENCE_INPUTS",),
+            "sfx_media": ("KARAOKE_SFX_INPUTS",),
             "reference_images": ("KARAOKE_REFERENCES",),
             "sound_effects": ("KARAOKE_SFX_LIST",),
             "image": ("IMAGE", {"tooltip": "Legacy optional single reference image."}),
@@ -255,7 +308,7 @@ class ImageSongPlan:
 
     def plan(self, song_request, duration, section_seconds, lyrics_override, writer_model, seed,
              media_inputs_json=MEDIA_INPUTS_DEFAULT, sfx_description="", reference_images=None,
-             sound_effects=None, image=None, sfx_audio=None):
+             sound_effects=None, image=None, sfx_audio=None, reference_media=None, sfx_media=None):
         import comfy.model_management as mm
         seconds = parse_duration(duration)
         if not song_request.strip():
@@ -264,6 +317,8 @@ class ImageSongPlan:
         reference_dir, sfx_dir = job / "references", job / "sound_effects"
         reference_dir.mkdir()
         sfx_dir.mkdir()
+        media_inputs_json = _merge_dynamic_media_inputs(
+            media_inputs_json, reference_media=reference_media, sfx_media=sfx_media)
         references, effects = _materialize_media_inputs(media_inputs_json, reference_dir, sfx_dir)
         for index, item in enumerate(reference_images or []):
             path = reference_dir / f"reference_{len(references) + 1:03d}.png"
@@ -550,12 +605,16 @@ class ImageSongRender:
 
 
 NODE_CLASS_MAPPINGS = {
+    "KaraokeReferenceImagesInput": KaraokeReferenceImagesInput,
+    "KaraokeSoundEffectsInput": KaraokeSoundEffectsInput,
     "KaraokeReferenceImage": KaraokeReferenceImage,
     "KaraokeSoundEffect": KaraokeSoundEffect,
     "ImageSongPlan": ImageSongPlan,
     "ImageSongRender": ImageSongRender,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "KaraokeReferenceImagesInput": "Reference Images",
+    "KaraokeSoundEffectsInput": "Sound Effects",
     "KaraokeReferenceImage": "Karaoke Director — Reference Image",
     "KaraokeSoundEffect": "Karaoke Director — Sound Effect",
     "ImageSongPlan": "Karaoke Director — Plan Song + Scenes",
