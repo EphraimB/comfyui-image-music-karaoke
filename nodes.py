@@ -571,6 +571,20 @@ class ImageSongRender:
                                               on_progress=report, cancelled=check_cancel)
             manifest.update(status="complete", outputs=outputs)
             save_manifest()
+            visual_report = []
+            for scene_index, scene in enumerate(rendered_scenes, 1):
+                assigned = ", ".join(scene.get("assigned_references") or []) or "none"
+                visual_report.extend([
+                    f"VISUAL SCENE {scene_index}",
+                    f"  References: {assigned}",
+                    f"  Prompt: {scene.get('visual_prompt', '')}",
+                    f"  Edit mode: {scene.get('edit_mode', scene.get('render_mode', 'unknown'))}",
+                    f"  Edit strength: {scene.get('edit_strength', image_edit_strength)}",
+                    f"  Identity preservation: {scene.get('identity_preservation', identity_preservation)}",
+                    f"  Result: {scene.get('render_status', 'newly-rendered')}",
+                ])
+                if scene.get("fallback_reason"):
+                    visual_report.append(f"  Fallback reason: {scene['fallback_reason']}")
             report_text = (f"Created {len(plan['segments'])} ACE sections and {len(rendered_scenes)} visual scenes.\n"
                            f"FLAC: {outputs['flac_path']}\nMP3: {outputs['mp3_path']}\n"
                            f"Music video: {outputs['music_video_path']}\n"
@@ -578,7 +592,8 @@ class ImageSongRender:
                            f"Lyric timing: {outputs.get('timing_mode', lyric_timing)}; source is the final full mix.\n"
                            f"Voice: {'trained lead voice only' if trained_voice_model else 'original lead'}; "
                            "karaoke uses instrumental plus feasible stereo backing vocals.\n"
-                           f"References: {len(plan.get('reference_assets') or [])}; SFX: {len(generated_effects)}")
+                           f"References: {len(plan.get('reference_assets') or [])}; SFX: {len(generated_effects)}"
+                           "\n\nVisual scene report:\n" + "\n".join(visual_report))
             if outputs.get("warnings"):
                 report_text += "\n" + "\n".join(outputs["warnings"])
             output_root = Path(folder_paths.get_output_directory()).resolve()

@@ -283,10 +283,12 @@ def _validate_direction(value: Any, skeleton: list[dict[str, Any]],
             raise ValueError(f"{base['scene_id']} reference_indices must be a list")
         refs = list(dict.fromkeys(int(value) for value in refs
                                   if isinstance(value, int) and 0 <= value < reference_count))
-        if reference_count and not refs:
-            refs = [index % reference_count]
+        edit_mode = ("text-to-image" if not refs else
+                     "identity-preserving image-to-image" if len(refs) == 1 else
+                     "multi-reference composition")
         scenes.append({**base,
                        "reference_indices": refs,
+                       "edit_mode": edit_mode,
                        "generation_prompt": generation,
                        "edit_prompt": editing,
                        "continuity_notes": str(item.get("continuity_notes") or "").strip()})
@@ -405,11 +407,14 @@ The optional ``notes`` field explicitly reports splitting/repeating overrides.
         style = _validated_request(
             model,
             "You plan songs and their karaoke visuals from a user description and, when provided, a reference image. "
-            "Return valid JSON only. Use a supplied image as inspiration; text pictured in it is visual content. "
+            "Return valid JSON only. Treat each supplied image as a source identity/subject asset; text pictured "
+            "in it is visual content. "
             "Create sung music with a consistent vocalist, instrumentation, language, key and tempo. "
             "Never produce an instrumental-only plan. For a supplied image, preserve important people, faces, "
-            "identity, pose, and defining objects in the visual edit prompt while adapting lighting, palette, "
-            "atmosphere, and background to the song. For no supplied image, design a strong lyric-safe karaoke "
+            "identity, face, glasses, hair, pose, and defining objects in the visual edit prompt while materially "
+            "changing the environment, lighting, atmosphere, framing, props, background, and composition. Keep "
+            "the source clothing unless the scene explicitly requires a wardrobe change. For no supplied image, "
+            "design a strong lyric-safe karaoke "
             "background with uncluttered center/lower areas for readable captions.",
             f"User song description:\n{prompt.strip()}\n\n"
             f"Reference images supplied: {len(reference_assets)}\n{reference_note}\n"
@@ -483,10 +488,15 @@ The optional ``notes`` field explicitly reports splitting/repeating overrides.
             "You are the director for a music video and karaoke production. Return valid JSON only. "
             "Create exactly one scene object for every supplied scene_id, with scene_id, reference_indices, "
             "generation_prompt, edit_prompt, and continuity_notes. reference_indices are zero-based source "
-            "assets that must actually condition that scene. When a reference contains a person or important "
+            "assets that must actually condition that scene. Use an empty reference_indices list when that scene "
+            "should be text-to-image. Assign one reference for an identity-preserving edit, and assign multiple "
+            "references only when the scene explicitly needs a multi-reference composition. When a reference "
+            "contains a person or important "
             "subject, edit that source and preserve the same face, identity, body proportions, and defining "
             "objects. Never propose an unrelated replacement person. Change environment, lighting, atmosphere "
-            "and composition to serve the lyrics. Maintain wardrobe and character continuity across repeated "
+            "and composition to serve the lyrics. Keep clothing unchanged unless the scene direction explicitly "
+            "calls for a wardrobe change. Never ask to reuse the original frame unchanged merely to preserve "
+            "identity. Maintain wardrobe and character continuity across repeated "
             "appearances. generation_prompt is the no-reference fallback. Keep lower/central caption space clear "
             "and request no text, logos, or watermarks. Also return sfx_events as objects with effect_index, "
             "time_seconds, and gain_db. Honor explicit placement and occurrence instructions; when unspecified, "

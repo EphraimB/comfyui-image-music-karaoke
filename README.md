@@ -132,12 +132,13 @@ The default image model is [Comfy-Org's Flux.1 Schnell FP8](https://huggingface.
 
 | File | Place under `ComfyUI/models` | Purpose |
 | --- | --- | --- |
-| `flux1-schnell-fp8.safetensors` | `diffusion_models/` | Scene generation and reference-conditioned editing |
+| `flux1-schnell-fp8.safetensors` | `diffusion_models/` | Text-to-image scenes and generated-background fallback |
+| `flux1-fill-dev.safetensors` | `diffusion_models/` | Required masked background/scene editing around protected reference identities |
 | `clip_l.safetensors` | `text_encoders/` | Flux CLIP-L encoder |
 | `t5xxl_fp16.safetensors` | `text_encoders/` | Flux T5-XXL encoder |
 | `ae.safetensors` | `vae/` | Flux autoencoder |
 
-The FP16 T5 encoder and the configured Flux model require substantial memory. Changing to a lower-memory encoder/model requires selecting a compatible filename in the render node and may change output quality.
+The FP16 T5 encoder and Flux models require substantial memory. The render node's selected image model handles text-to-image scenes. When a scene has assigned references, the visual pipeline automatically uses `flux1-fill-dev.safetensors` for masked editing when that file is installed. If it is absent or cannot run, the pipeline renders a fresh background with the selected image model and composites only the protected identity pixels; it records that fallback in the export report instead of returning the unchanged source frame.
 
 ### Demucs vocal separation
 
@@ -198,7 +199,7 @@ The Director creates the music style, tempo, key, section lyrics, visual scenes,
 - Give identity instructions explicitly, such as “Main performer; preserve face, glasses, hair, and clothing across chorus scenes.”
 - Use **Remove** to delete an entry. No image is required.
 
-References are uploaded to ComfyUI's input directory and passed as actual pixel-conditioned image-to-image inputs. The Director may assign different references to different song scenes or combine several references in one scene. With no references, it creates scene prompts from the song and lyrics.
+References are uploaded to ComfyUI's input directory and passed as actual pixel-conditioned inputs. The Director may assign different references to different song scenes or combine several references in one scene. Assigned portraits use a protected face/hair/glasses region and a masked FLUX Fill edit for the surrounding scene. Clothing remains protected unless the scene prompt explicitly requests a wardrobe change. With no references, the pipeline uses ordinary text-to-image generation.
 
 ## Sound effects
 
@@ -232,8 +233,8 @@ The frontend extension adds output cards for the FLAC, MP3, music video, and kar
 
 - The default ACE-Step XL, Flux, and Gemma models require substantial disk space, RAM, and VRAM. CPU-only operation is impractically slow for typical songs.
 - Sections are generated independently. The planner keeps style and refrain consistent, but long songs can have audible changes at section boundaries.
-- Reference preservation uses low-denoise image-to-image conditioning plus a pixel-space blend. It strongly favors the supplied subject but is not a biometric identity guarantee.
-- Multiple references assigned to one scene are composed into a conditioning canvas. Crowded or conflicting references reduce fidelity.
+- Reference preservation keeps identity-critical source pixels and uses masked FLUX Fill generation for editable regions. It strongly preserves the supplied face, glasses, and hair, but segmentation boundaries and extreme pose changes can still produce visible seams; it is not a biometric identity guarantee.
+- Multiple references assigned to one scene are arranged into a shared conditioning canvas before masked composition. Crowded, differently lit, or conflicting references reduce composition quality.
 - Visual scenes are still images synchronized to the structure; this project does not synthesize character animation or lip movement.
 - Demucs and the lead/backing heuristic can leave vocal residue in karaoke audio or remove some backing harmonies.
 - RVC quality depends on the training set, pitch range, source vocal, and separation quality. Extreme singing can produce artifacts.
