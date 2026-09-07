@@ -72,25 +72,32 @@ function element(tag, options = {}, children = []) {
 }
 
 function field(label, control) {
-  return element("label", { style: "display:grid;gap:4px;font-size:12px;color:#cbd5e1;" }, [
+  return element("label", { style: "box-sizing:border-box;display:grid;gap:4px;width:100%;min-width:0;max-width:100%;font-size:12px;color:#cbd5e1;" }, [
     element("span", { text: label }), control,
   ]);
 }
 
+function isolateEditorControl(control) {
+  for (const eventName of ["pointerdown", "mousedown", "click", "dblclick"]) {
+    control.addEventListener(eventName, (event) => event.stopPropagation());
+  }
+  return control;
+}
+
 function textArea(value, placeholder, onInput, rows = 3) {
-  return element("textarea", {
+  return isolateEditorControl(element("textarea", {
     value: value || "", placeholder, rows,
-    style: "box-sizing:border-box;width:100%;resize:vertical;border:1px solid #4b5563;border-radius:6px;background:#111827;color:#f8fafc;padding:7px;font:12px/1.35 sans-serif;",
-    oninput: (event) => onInput(event.target.value),
-  });
+    style: "box-sizing:border-box;display:block;width:100%;min-width:0;max-width:100%;resize:vertical;overflow-x:hidden;overflow-wrap:anywhere;white-space:pre-wrap;border:1px solid #4b5563;border-radius:6px;background:#111827;color:#f8fafc;padding:7px;font:12px/1.35 sans-serif;",
+    oninput: (event) => { event.stopPropagation(); onInput(event.target.value); },
+  }));
 }
 
 function textInput(value, placeholder, onInput, type = "text") {
-  return element("input", {
+  return isolateEditorControl(element("input", {
     value: value ?? "", placeholder, type,
-    style: "box-sizing:border-box;width:100%;border:1px solid #4b5563;border-radius:6px;background:#111827;color:#f8fafc;padding:7px;font:12px sans-serif;",
-    oninput: (event) => onInput(event.target.value),
-  });
+    style: "box-sizing:border-box;display:block;width:100%;min-width:0;max-width:100%;border:1px solid #4b5563;border-radius:6px;background:#111827;color:#f8fafc;padding:7px;font:12px sans-serif;",
+    oninput: (event) => { event.stopPropagation(); onInput(event.target.value); },
+  }));
 }
 
 function button(label, onClick, kind = "normal") {
@@ -101,7 +108,7 @@ function button(label, onClick, kind = "normal") {
       : "background:#273449;border-color:#475569;color:#e2e8f0;";
   return element("button", {
     type: "button", text: label,
-    style: `cursor:pointer;border:1px solid;border-radius:6px;padding:7px 10px;font:12px sans-serif;${colors}`,
+    style: `box-sizing:border-box;flex:0 0 auto;max-width:100%;white-space:nowrap;cursor:pointer;border:1px solid;border-radius:6px;padding:7px 10px;font:12px sans-serif;${colors}`,
     onclick: (event) => { event.preventDefault(); event.stopPropagation(); onClick(event); },
   });
 }
@@ -126,9 +133,11 @@ function installMediaEditor(node, kind) {
   node.widgets.splice(originalIndex, 1);
 
   const root = element("div", {
-    style: "box-sizing:border-box;height:650px;overflow:auto;display:flex;flex-direction:column;gap:12px;padding:10px;background:#0b1220;color:#f8fafc;border:1px solid #334155;border-radius:8px;",
+    style: "box-sizing:border-box;inline-size:100%;width:100%;min-inline-size:0;min-width:0;max-inline-size:100%;max-width:100%;height:650px;overflow-x:hidden;overflow-y:auto;contain:inline-size layout paint;display:flex;flex-direction:column;gap:12px;padding:10px;background:#0b1220;color:#f8fafc;border:1px solid #334155;border-radius:8px;",
   });
   root.addEventListener("pointerdown", (event) => event.stopPropagation());
+  root.addEventListener("mousedown", (event) => event.stopPropagation());
+  root.addEventListener("dblclick", (event) => event.stopPropagation());
 
   let editorWidget;
   const dirty = () => {
@@ -139,8 +148,8 @@ function installMediaEditor(node, kind) {
   const render = () => {
     root.replaceChildren();
     if (kind === "references") {
-      root.append(element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;" }, [
-        element("strong", { text: `Reference Images (${state.references.length})`, style: "font:700 14px sans-serif;" }),
+      root.append(element("div", { style: "box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-width:0;max-width:100%;" }, [
+        element("strong", { text: `Reference Images (${state.references.length})`, style: "min-width:0;font:700 14px sans-serif;" }),
         button("+ Add Image", () => {
           state.references.push({ id: crypto.randomUUID(), filename: "", instruction: "" });
           render(); dirty();
@@ -168,24 +177,24 @@ function installMediaEditor(node, kind) {
             }
           });
         });
-        const card = element("div", { style: "display:grid;gap:8px;padding:10px;border:1px solid #334155;border-radius:8px;background:#111827;" }, [
-          element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;" }, [
-            element("strong", { text: `Image ${index + 1}`, style: "font:700 13px sans-serif;" }),
+        const card = element("div", { style: "box-sizing:border-box;display:grid;grid-template-columns:minmax(0,1fr);gap:8px;width:100%;min-width:0;max-width:100%;padding:10px;overflow:hidden;border:1px solid #334155;border-radius:8px;background:#111827;" }, [
+          element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-width:0;max-width:100%;" }, [
+            element("strong", { text: `Image ${index + 1}`, style: "min-width:0;font:700 13px sans-serif;" }),
             button("Remove", () => { state.references.splice(index, 1); render(); dirty(); }, "remove"),
           ]),
           element("div", { style: "display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;" }, [choose, fileName]),
         ]);
         if (item.filename) {
           card.append(element("img", { src: assetURL(item), alt: fileName.textContent,
-            style: "width:100%;max-height:180px;object-fit:contain;border-radius:6px;background:#020617;" }));
+            style: "box-sizing:border-box;display:block;width:100%;min-width:0;max-width:100%;height:auto;max-height:180px;object-fit:contain;border-radius:6px;background:#020617;" }));
         }
         card.append(field("Who or what is shown, and how should this image be used?",
           textArea(item.instruction, "Example: Main character. Preserve their identity and use them in chorus scenes.", (value) => { item.instruction = value; dirty(); }, 3)));
         root.append(card);
       });
     } else {
-      root.append(element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;" }, [
-        element("strong", { text: `Sound Effects (${state.sound_effects.length})`, style: "font:700 14px sans-serif;" }),
+      root.append(element("div", { style: "box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-width:0;max-width:100%;" }, [
+        element("strong", { text: `Sound Effects (${state.sound_effects.length})`, style: "min-width:0;font:700 14px sans-serif;" }),
         button("+ Add Sound Effect", () => {
           state.sound_effects.push({ id: crypto.randomUUID(), filename: "", description: "", placement: "", occurrences: "automatic", duration: 4, gain_db: -18 });
           render(); dirty();
@@ -220,14 +229,14 @@ function installMediaEditor(node, kind) {
             render(); dirty();
           }));
         }
-        const card = element("div", { style: "display:grid;gap:8px;padding:10px;border:1px solid #334155;border-radius:8px;background:#111827;" }, [
-          element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;" }, [
-            element("strong", { text: `Sound Effect ${index + 1}`, style: "font:700 13px sans-serif;" }),
+        const card = element("div", { style: "box-sizing:border-box;display:grid;grid-template-columns:minmax(0,1fr);gap:8px;width:100%;min-width:0;max-width:100%;padding:10px;overflow:hidden;border:1px solid #334155;border-radius:8px;background:#111827;" }, [
+          element("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-width:0;max-width:100%;" }, [
+            element("strong", { text: `Sound Effect ${index + 1}`, style: "min-width:0;font:700 13px sans-serif;" }),
             button("Remove", () => { state.sound_effects.splice(index, 1); render(); dirty(); }, "remove"),
           ]), fileRow,
         ]);
         if (item.filename) {
-          card.append(element("audio", { src: assetURL(item), controls: true, preload: "metadata", style: "width:100%;height:34px;" }));
+          card.append(element("audio", { src: assetURL(item), controls: true, preload: "metadata", style: "box-sizing:border-box;display:block;width:100%;min-width:0;max-width:100%;height:34px;" }));
         }
         card.append(
           field("Sound description (or a label for uploaded audio)",
@@ -260,6 +269,18 @@ function installMediaEditor(node, kind) {
       render();
     },
   });
+  const stableWidth = Math.max(Number(node.size?.[0]) || 0, 520);
+  editorWidget.computeSize = () => [stableWidth, 670];
+  requestAnimationFrame(() => {
+    const wrapper = root.parentElement;
+    if (!wrapper) return;
+    wrapper.style.boxSizing = "border-box";
+    wrapper.style.width = "100%";
+    wrapper.style.minWidth = "0";
+    wrapper.style.maxWidth = "100%";
+    wrapper.style.overflow = "hidden";
+    wrapper.style.contain = "inline-size layout paint";
+  });
   const addedIndex = node.widgets.indexOf(editorWidget);
   node.widgets.splice(addedIndex, 1);
   node.widgets.splice(originalIndex, 0, editorWidget);
@@ -273,7 +294,7 @@ function installMediaEditor(node, kind) {
     render,
   };
   render();
-  node.setSize([Math.max(node.size[0], 520), Math.max(node.size[1], 720)]);
+  node.setSize([stableWidth, Math.max(node.size[1], 720)]);
 }
 
 function hideLegacyPlannerMedia(node) {
