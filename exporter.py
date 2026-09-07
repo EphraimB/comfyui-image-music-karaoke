@@ -259,6 +259,27 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
 
+def _music_ass_header(width, height):
+    font = max(18, round(height * 0.038))
+    horizontal_margin = max(24, round(width * 0.055))
+    vertical_margin = max(24, round(height * 0.060))
+    return f"""[Script Info]
+Title: Image + Lyrics Music Video
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+PlayResX: {width}
+PlayResY: {height}
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: MusicVideo,Arial,{font},&H00FFFFFF,&H00FFFFFF,&H00101010,&H70000000,-1,0,0,0,100,100,0,0,1,2,1,2,{horizontal_margin},{horizontal_margin},{vertical_margin},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
 def _ass_events(words, offset, duration):
     groups, group = [], []
     for word in words:
@@ -284,6 +305,40 @@ def _ass_events(words, offset, duration):
             cursor = word_end
         lines.append(f"Dialogue: 0,{_ass_time(offset + start)},{_ass_time(offset + end)},Karaoke,,0,0,0,," + "".join(parts).rstrip())
     return lines
+
+
+def _music_ass_events(words, offset, duration):
+    groups, group = [], []
+    for word in words:
+        length = sum(len(item["text"]) + 1 for item in group)
+        line_count = len({item["line"] for item in group} | {word["line"]})
+        if group and (len(group) >= 12 or length + len(word["text"]) > 76 or line_count > 2):
+            groups.append(group)
+            group = []
+        group.append(word)
+    if group:
+        groups.append(group)
+
+    events = []
+    for index, group in enumerate(groups):
+        start = 0.0 if index == 0 else group[0]["start"]
+        end = groups[index + 1][0]["start"] if index + 1 < len(groups) else duration
+        rows = []
+        for word in group:
+            if not rows or rows[-1][0] != word["line"]:
+                rows.append((word["line"], []))
+            rows[-1][1].append(_safe_ass(word["text"]))
+        if len(rows) == 1 and len(group) > 7:
+            midpoint = len(group) // 2
+            text = " ".join(_safe_ass(word["text"]) for word in group[:midpoint])
+            text += r"\N" + " ".join(_safe_ass(word["text"]) for word in group[midpoint:])
+        else:
+            text = r"\N".join(" ".join(row) for _line, row in rows)
+        events.append(
+            f"Dialogue: 0,{_ass_time(offset + start)},{_ass_time(offset + end)},"
+            f"MusicVideo,,0,0,0,,{{\\fad(120,180)}}{text}"
+        )
+    return events
 
 
 def export_karaoke(segments, image_path, output_dir, basename="song", *,
@@ -551,6 +606,7 @@ def export_directed_package(segments, scenes, output_dir, basename="song", *,
         scratch = Path(temporary)
         full_concat, karaoke_concat = [], []
         subtitle = [_ass_header(width, height)]
+        music_subtitle = [_music_ass_header(width, height)]
         for spec in specs:
             report(f"Preparing final mixes {spec['index']}/{len(specs)}", 0.05 + 0.32 * (spec["index"] - 1) / len(specs))
             normalized = {}
@@ -606,10 +662,12 @@ def export_directed_package(segments, scenes, output_dir, basename="song", *,
                              "words": [{**word, "start": word["start"] + offset,
                                         "end": word["end"] + offset} for word in words]})
             subtitle.extend(_ass_events(words, offset, spec["duration"]))
+            music_subtitle.extend(_music_ass_events(words, offset, spec["duration"]))
         del model
         (scratch / "full.txt").write_text("\n".join(full_concat) + "\n", encoding="utf-8")
         (scratch / "karaoke.txt").write_text("\n".join(karaoke_concat) + "\n", encoding="utf-8")
         (scratch / "lyrics.ass").write_text("\n".join(subtitle) + "\n", encoding="utf-8-sig")
+        (scratch / "music_lyrics.ass").write_text("\n".join(music_subtitle) + "\n", encoding="utf-8-sig")
         for listing, target in (("full.txt", "song.flac"), ("karaoke.txt", "karaoke.flac")):
             _run(base + ["-f", "concat", "-safe", "0", "-i", listing, "-map", "0:a:0",
                          "-af", f"atrim=end_sample={sample_cursor},asetpts=N/SR/TB", "-c:a", "flac",
@@ -637,9 +695,10 @@ def export_directed_package(segments, scenes, output_dir, basename="song", *,
         (scratch / "visuals.txt").write_text("\n".join(clip_files) + "\n", encoding="utf-8")
         _run(base + ["-f", "concat", "-safe", "0", "-i", "visuals.txt", "-c", "copy", "visuals.mp4"],
              cwd=scratch, cancelled=cancelled)
-        report("Encoding full-song music video", 0.72)
+        report("Encoding lyric-timed full-song music video", 0.72)
         _run(base + ["-i", "visuals.mp4", "-i", "song.flac", "-map", "0:v:0", "-map", "1:a:0",
-                     "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-ar", str(SAMPLE_RATE),
+                     "-vf", "ass=music_lyrics.ass", "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k", "-ar", str(SAMPLE_RATE),
                      "-t", f"{total_duration:.8f}", "-movflags", "+faststart", "music_video.mp4"],
              cwd=scratch, cancelled=cancelled)
         report("Encoding lyric-timed karaoke video", 0.84)
