@@ -16,6 +16,8 @@ from .audio_pipeline import (_channels, as_audio, master_audio, mix_sfx,
                              build_sfx_schedule, strip_sfx_markers,
                              generate_described_sfx, VocalMixBackend)
 from .visual_pipeline import create_scene_images
+from .ace_step_base import (AceStepBaseClient, AceStepBaseError, BASE_MODEL,
+                            LEGO_VOCALS_INSTRUCTION, PREFERRED_LM_MODEL)
 
 
 def parse_duration(value):
@@ -627,6 +629,97 @@ class ImageSongRender:
             model = clip = vae = None
 
 
+class AceStepBaseLegoVocals:
+    """Opt-in first milestone: generate an independent lead-vocal WAV."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "instrumental": ("AUDIO",),
+            "vocal_description": ("STRING", {"multiline": True, "default":
+                "Expressive clear lead singing that follows the supplied instrumental."}),
+            "lyrics": ("STRING", {"multiline": True, "default": "[Verse]\nSing these words"}),
+            "vocal_language": ("STRING", {"default": "en"}),
+            "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
+                              "control_after_generate": True}),
+            "inference_steps": ("INT", {"default": 50, "min": 32, "max": 64}),
+            "guidance_scale": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 15.0,
+                                         "step": 0.5}),
+            "server_url": ("STRING", {"default": "http://127.0.0.1:8001"}),
+        }}
+
+    RETURN_TYPES = ("AUDIO", "STRING", "STRING")
+    RETURN_NAMES = ("lead_vocal", "vocal_WAV", "generation_report")
+    FUNCTION = "generate"
+    OUTPUT_NODE = True
+    CATEGORY = "audio/Image Music Karaoke/ACE-Step Base"
+    DESCRIPTION = ("Experimental opt-in milestone: official ACE-Step 1.5 2B Base LEGO "
+                   "track_name=vocals from an existing instrumental. It does not alter the song renderer.")
+
+    def generate(self, instrumental, vocal_description, lyrics, vocal_language, seed,
+                 inference_steps, guidance_scale, server_url):
+        import soundfile as sf
+        import torch
+        import comfy.model_management as mm
+
+        if instrumental is None:
+            raise ValueError("Connect an existing instrumental AUDIO input.")
+        job = new_job() / "base_lego_vocals"
+        job.mkdir()
+        source_path = job / "instrumental.wav"
+        output_path = job / "lead_vocal.wav"
+        report_path = job / "lego_vocals_report.json"
+        rate = int(instrumental["sample_rate"])
+        source = _channels(instrumental, rate)
+        sf.write(source_path, source.T.numpy(), rate, format="WAV", subtype="PCM_24")
+        source_duration = float(source.shape[-1]) / float(rate)
+        log = {
+            "status": "starting", "model": BASE_MODEL, "task_type": "lego",
+            "track_name": "vocals", "instruction": LEGO_VOCALS_INSTRUCTION,
+            "source_audio": str(source_path), "output_path": str(output_path),
+            "source_duration": source_duration, "duration": None,
+            "preferred_lm": PREFERRED_LM_MODEL,
+            "lm_used": False,
+            "lm_note": "Official direct-conditioning LEGO currently bypasses the LM.",
+            "fallback": False,
+        }
+
+        def save_log():
+            report_path.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        save_log()
+        try:
+            report("Unloading ComfyUI models before ACE-Step 2B Base LEGO vocals")
+            mm.unload_all_models()
+            mm.soft_empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            client = AceStepBaseClient(server_url=server_url)
+            result = client.generate_lego_vocals(
+                source_path, output_path, caption=vocal_description, lyrics=lyrics,
+                vocal_language=vocal_language, seed=int(seed),
+                inference_steps=int(inference_steps), guidance_scale=float(guidance_scale),
+                on_progress=report,
+            )
+            samples, output_rate = sf.read(result.output_path, dtype="float32", always_2d=True)
+            vocal = as_audio(torch.from_numpy(samples.T.copy()), int(output_rate))
+            log.update(status="complete", task_id=result.task_id,
+                       duration=result.duration, server_result=result.server_item)
+            save_log()
+            summary = (f"ACE-Step Base LEGO vocal created\nModel: {BASE_MODEL}\n"
+                       f"Task: lego; track_name=vocals\nSource: {source_path}\n"
+                       f"Output: {output_path}\nDuration: {result.duration:.3f}s\nFallback: no")
+            report(summary.replace("\n", " | "))
+            return vocal, str(output_path), summary
+        except (AceStepBaseError, ValueError) as error:
+            log.update(status="failed", error=str(error))
+            save_log()
+            raise RuntimeError(
+                f"ACE-Step Base LEGO vocals failed without fallback. {error} "
+                f"Report: {report_path}"
+            ) from error
+
+
 NODE_CLASS_MAPPINGS = {
     "KaraokeReferenceImagesInput": KaraokeReferenceImagesInput,
     "KaraokeSoundEffectsInput": KaraokeSoundEffectsInput,
@@ -634,6 +727,7 @@ NODE_CLASS_MAPPINGS = {
     "KaraokeSoundEffect": KaraokeSoundEffect,
     "ImageSongPlan": ImageSongPlan,
     "ImageSongRender": ImageSongRender,
+    "AceStepBaseLegoVocals": AceStepBaseLegoVocals,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "KaraokeReferenceImagesInput": "Reference Images",
@@ -642,4 +736,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "KaraokeSoundEffect": "Karaoke Director — Sound Effect",
     "ImageSongPlan": "Karaoke Director — Plan Song + Scenes",
     "ImageSongRender": "Generate Song + Music Video + Karaoke",
+    "AceStepBaseLegoVocals": "ACE-Step Base — LEGO Lead Vocal (Milestone)",
 }

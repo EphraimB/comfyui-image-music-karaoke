@@ -246,6 +246,45 @@ The frontend extension adds output cards for the FLAC, MP3, music video, and kar
 - Ollama must remain available throughout planning. The current planner expects its local HTTP API on the default port.
 - The repository does not include third-party models or custom nodes; their licenses and installation requirements apply separately.
 
+## Experimental ACE-Step Base LEGO vocal milestone
+
+The optional **ACE-Step Base — LEGO Lead Vocal (Milestone)** node accepts an existing
+instrumental as ComfyUI `AUDIO` and saves a separate `lead_vocal.wav`. It is intentionally
+disconnected from the bundled workflow and does not alter the established XL SFT, Demucs,
+RVC, karaoke, mastering, SFX, video, or export paths.
+
+This node calls the official ACE-Step 1.5 local API at `http://127.0.0.1:8001`. Configure
+that service with the local 2B `acestep-v15-base` checkpoint. The node checks `/v1/model_inventory`
+before `/v1/init` and refuses to proceed unless the Base model is already reported, so it
+cannot start an implicit model download. Start the official service in offline mode when
+you need a hard server-side guarantee as well:
+
+```powershell
+$env:HF_HUB_OFFLINE = "1"
+$env:ACESTEP_CONFIG_PATH = "acestep-v15-base"
+$env:ACESTEP_OFFLOAD_TO_CPU = "true"
+$env:ACESTEP_NO_INIT = "false"
+python -m acestep.api_server
+```
+
+The official current inference path treats LEGO as direct source-audio conditioning and
+bypasses its language model. The integration records `acestep-5Hz-lm-1.7B` as the preferred
+future LM but does not spend VRAM loading an unused Qwen model for this milestone.
+
+For an isolated test, connect a ComfyUI audio loader to `instrumental`, enter the desired
+vocal performance and lyrics, and queue only this node. Before the request it unloads
+ComfyUI models and empties the CUDA cache. Each run creates:
+
+```text
+ComfyUI/output/image_music_karaoke/<job>/base_lego_vocals/
+├── instrumental.wav
+├── lead_vocal.wav
+└── lego_vocals_report.json
+```
+
+The report records the model, task, source and output paths, generated duration, and
+fallback status. There is deliberately no alternate generator or separator fallback.
+
 ## Privacy and repository hygiene
 
 The `.gitignore` blocks common model, voice, image, audio, video, output, cache, and credential formats. Before every public commit, still review staged files manually:
