@@ -535,10 +535,11 @@ class ImageSongRender:
                 samples, rate = sf.read(item["raw_audio_path"], dtype="float32", always_2d=True)
                 original = as_audio(torch.from_numpy(samples.T.copy()), int(rate))
                 target_samples = round(float(item["duration"]) * int(rate))
-                report(f"Separating lead/backing vocals for section {index + 1}/{len(manifest['segments'])}")
+                report(f"Separating a clean karaoke instrumental for section {index + 1}/{len(manifest['segments'])}")
                 full, karaoke, voice_info = voice_backend.process(original, sample_rate=int(rate),
                                                                   target_samples=target_samples)
                 item["voice_processing"] = voice_info
+                item["karaoke_separator"] = voice_backend.separation_status()
                 item["lead_voice_converted"] = bool(trained_voice_model)
                 cues = schedule.get(index, [])
                 for cue in cues:
@@ -557,7 +558,8 @@ class ImageSongRender:
                          format="FLAC", subtype="PCM_24")
                 item.update(audio_path=str(full_path), karaoke_audio_path=str(karaoke_path),
                             sfx_cues=cues,
-                            processing_order=["ACE-Step", "Demucs lead/backing separation",
+                            processing_order=["ACE-Step",
+                                              f"Demucs {item['karaoke_separator']['model']} instrumental separation",
                                               "lead-only RVC" if trained_voice_model else "original lead",
                                               "SFX in both mixes" if cues else "no SFX in this section",
                                               "separate mastering", "alignment against final full mix"])
@@ -585,15 +587,21 @@ class ImageSongRender:
                 ])
                 if scene.get("fallback_reason"):
                     visual_report.append(f"  Fallback reason: {scene['fallback_reason']}")
+            separator_status = voice_backend.separation_status()
             report_text = (f"Created {len(plan['segments'])} ACE sections and {len(rendered_scenes)} visual scenes.\n"
                            f"FLAC: {outputs['flac_path']}\nMP3: {outputs['mp3_path']}\n"
                            f"Music video: {outputs['music_video_path']}\n"
                            f"Karaoke video: {outputs['karaoke_video_path']}\n"
                            f"Lyric timing: {outputs.get('timing_mode', lyric_timing)}; source is the final full mix.\n"
-                           f"Voice: {'trained lead voice only' if trained_voice_model else 'original lead'}; "
-                           "karaoke uses instrumental plus feasible stereo backing vocals.\n"
+                           f"Voice: {'trained lead voice only' if trained_voice_model else 'original lead'}.\n"
+                           f"Karaoke separator: Demucs {separator_status['model']}; "
+                           f"fallback={'yes' if separator_status['fallback'] else 'no'}. "
+                           "Karaoke uses the instrumental stem only; backing vocals that cannot be separated "
+                           "from the lead remain excluded with the vocal stem.\n"
                            f"References: {len(plan.get('reference_assets') or [])}; SFX: {len(generated_effects)}"
                            "\n\nVisual scene report:\n" + "\n".join(visual_report))
+            if separator_status["fallback_reason"]:
+                report_text += f"\nKaraoke separator fallback reason: {separator_status['fallback_reason']}"
             if outputs.get("warnings"):
                 report_text += "\n" + "\n".join(outputs["warnings"])
             output_root = Path(folder_paths.get_output_directory()).resolve()

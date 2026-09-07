@@ -7,7 +7,7 @@
 - `music_video.mp4` — scene sequence with the full mix
 - `karaoke_video.mp4` — scene sequence with synchronized lyrics and the karaoke mix
 
-The full mix contains the instrumental, lead vocal, feasible backing vocals, and scheduled SFX. The karaoke mix removes the separated lead vocal while retaining the instrumental, SFX, and feasible backing vocals.
+The full mix contains the instrumental, lead vocal, backing vocals, and scheduled SFX. The karaoke mix uses the clean separated instrumental plus scheduled SFX. Vocal-stem material is not mixed back into the karaoke track.
 
 Everything runs locally. The repository contains code and a sanitized workflow only. It contains no model weights, voice models, photographs, recordings, generated media, or credentials.
 
@@ -142,7 +142,9 @@ The FP16 T5 encoder and Flux models require substantial memory. The render node'
 
 ### Demucs vocal separation
 
-The pipeline selects `htdemucs` through ComfyUI_Demucs. That project downloads and caches its pretrained Demucs files when needed; it does not belong in this repository. Follow ComfyUI_Demucs if you need to pre-populate its cache for an offline machine.
+The karaoke path prefers the fine-tuned `htdemucs_ft` model through ComfyUI_Demucs, with 50% overlap and two shift passes. ComfyUI_Demucs downloads and caches its four official checkpoints when needed; they do not belong in this repository. If that model cannot load or run, the pipeline retries locally with `htdemucs` and records the fallback and reason in `generation.json` and the export report.
+
+Karaoke uses only the model's instrumental output. It does not add the stereo-side estimate from the vocal stem back into the mix. This removes lead vocals much more strongly. Backing vocals that the model groups with the lead are also removed; backing vocals embedded in an instrumental stem can remain because they are not independently separable.
 
 ### Lyric alignment
 
@@ -213,7 +215,7 @@ SFX are normalized and mixed into both the full and karaoke arrangements before 
 
 ## Trained singing voice
 
-ACE-Step first generates the complete musical performance. Demucs separates the instrumental and vocal stem. The vocal stem is divided into lead and backing components; only the lead is sent through RVC. The converted lead is level-matched and recombined with the instrumental and backing vocal estimate. The instrumental is never sent through voice conversion.
+ACE-Step first generates the complete musical performance. The established `htdemucs` voice path separates the vocal stem when RVC is connected. That vocal stem is divided into lead and backing components; only the lead is sent through RVC, then recombined for the full song exactly as before. A separate `htdemucs_ft` pass supplies only the karaoke instrumental. The instrumental is never sent through voice conversion.
 
 To replace the voice later, select another `.pth`/`.index` pair in the loader. The song pipeline itself does not need to change.
 
@@ -236,7 +238,7 @@ The frontend extension adds output cards for the FLAC, MP3, music video, and kar
 - Reference preservation keeps identity-critical source pixels and uses masked FLUX Fill generation for editable regions. It strongly preserves the supplied face, glasses, and hair, but segmentation boundaries and extreme pose changes can still produce visible seams; it is not a biometric identity guarantee.
 - Multiple references assigned to one scene are arranged into a shared conditioning canvas before masked composition. Crowded, differently lit, or conflicting references reduce composition quality.
 - Visual scenes are still images synchronized to the structure; this project does not synthesize character animation or lip movement.
-- Demucs and the lead/backing heuristic can leave vocal residue in karaoke audio or remove some backing harmonies.
+- No separator can guarantee perfect isolation. `htdemucs_ft` can leave quiet vocal residue or remove backing harmonies that overlap the lead; the fallback `htdemucs` model is faster but usually less clean.
 - RVC quality depends on the training set, pitch range, source vocal, and separation quality. Extreme singing can produce artifacts.
 - Whisper alignment can fall back to estimated timing when no local model is available or recognition differs too much from the supplied lyrics.
 - Described SFX use a limited procedural fallback unless a compatible neural SFX engine is connected.

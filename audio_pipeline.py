@@ -8,6 +8,7 @@ voice-converted and SFX-mixed performance.
 from __future__ import annotations
 
 import math
+import logging
 import re
 from dataclasses import dataclass
 
@@ -302,18 +303,79 @@ def master_audio(audio, *, sample_rate: int, target_samples: int,
 
 @dataclass
 class VocalMixBackend:
-    """Replaceable Demucs lead/backing split with optional RVC lead conversion."""
+    """Strong karaoke separation plus the existing optional RVC lead conversion."""
 
     call_node: object
     rvc_model: dict | None = None
     pitch: int = 0
     _separator: object = None
+    _voice_separator: object = None
     _engine: object = None
     _converter: object = None
+    _separator_model: str = "htdemucs_ft"
+    _separator_fallback: bool = False
+    _separator_reason: str = ""
+
+    def _load_separator(self, model: str, *, overlap: float, shifts: int):
+        return self.call_node("Demucs_Loader", d_model=model, overlap=overlap,
+                              shifts=shifts, split=True)[0]
+
+    def _load_karaoke_separator(self) -> None:
+        try:
+            self._separator = self._load_separator("htdemucs_ft", overlap=0.50, shifts=2)
+            self._separator_model = "htdemucs_ft"
+            self._separator_fallback = False
+            self._separator_reason = ""
+        except Exception as error:
+            self._separator = self._load_separator("htdemucs", overlap=0.35, shifts=1)
+            self._separator_model = "htdemucs"
+            self._separator_fallback = True
+            self._separator_reason = f"{type(error).__name__}: {error}"
+            logging.warning("Karaoke separator fell back to Demucs htdemucs: %s",
+                            self._separator_reason)
+
+    def _sample(self, separator, music_audio):
+        return self.call_node("Demucs_Sampler", model=separator, audio=music_audio,
+                              ext="flac", bits_per_sample=24, as_float="float32",
+                              clip_mode="rescale", mp3_bitrate=320,
+                              audio_save=False, preset=2)
+
+    def _fallback_after_runtime_error(self, music_audio, error):
+        if self._separator_model == "htdemucs":
+            raise error
+        self._separator = None
+        self._separator_model = "htdemucs"
+        self._separator_fallback = True
+        self._separator_reason = f"{type(error).__name__}: {error}"
+        logging.warning("Karaoke separator htdemucs_ft failed during separation; "
+                        "retrying with htdemucs: %s", self._separator_reason)
+        try:
+            import gc
+            import torch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        self._separator = self._load_separator("htdemucs", overlap=0.35, shifts=1)
+        return self._sample(self._separator, music_audio)
+
+    def separation_status(self) -> dict:
+        return {
+            "architecture": "Demucs",
+            "model": self._separator_model,
+            "overlap": 0.50 if self._separator_model == "htdemucs_ft" else 0.35,
+            "shifts": 2 if self._separator_model == "htdemucs_ft" else 1,
+            "fallback": self._separator_fallback,
+            "fallback_reason": self._separator_reason,
+            "karaoke_source": "instrumental stem only",
+            "backing_vocals": ("Removed with the vocal stem when inseparable; no vocal-stem "
+                                "material is mixed back into karaoke."),
+        }
 
     def load(self) -> None:
-        self._separator = self.call_node("Demucs_Loader", d_model="htdemucs",
-                                        overlap=0.25, shifts=1, split=True)[0]
+        if self._voice_separator is None:
+            self._voice_separator = self._load_separator("htdemucs", overlap=0.25, shifts=1)
         if self.rvc_model is not None:
             self._engine = self.call_node("RVCEngineNode", pitch=int(self.pitch), index_ratio=0.75,
                                           consonant_protection=0.25, volume_envelope=0.25,
@@ -323,19 +385,16 @@ class VocalMixBackend:
 
     def process(self, music_audio, *, sample_rate: int,
                 target_samples: int) -> tuple[dict, dict, str]:
-        if self._separator is None:
+        if self._voice_separator is None:
             self.load()
-        separated = self.call_node("Demucs_Sampler", model=self._separator, audio=music_audio,
-                                   ext="flac", bits_per_sample=24, as_float="float32",
-                                   clip_mode="rescale", mp3_bitrate=320,
-                                   audio_save=False, preset=2)
-        instrumental, original_vocal = separated[0], separated[4]
+        voice_separated = self._sample(self._voice_separator, music_audio)
+        instrumental, original_vocal = voice_separated[0], voice_separated[4]
         inst = _channels(instrumental, sample_rate, target_samples)
         lead, backing = split_lead_and_backing(original_vocal, sample_rate=sample_rate,
                                                target_samples=target_samples)
         lead_wave = _channels(lead, sample_rate, target_samples)
         backing_wave = _channels(backing, sample_rate, target_samples)
-        info = "Lead vocal separated; original lead retained."
+        voice_info = "Original full mix retained."
         if self.rvc_model is not None:
             converted, conversion_info = self.call_node(
                 "UnifiedVoiceChangerNode", TTS_engine=self._engine,
@@ -344,9 +403,21 @@ class VocalMixBackend:
             converted_wave = _channels(converted, sample_rate, target_samples)
             gain = max(0.4, min(2.5, _rms(lead_wave) / max(_rms(converted_wave), 1e-5)))
             lead_wave = converted_wave * gain
-            info = str(conversion_info)
+            voice_info = str(conversion_info)
         full = as_audio(inst + lead_wave + backing_wave, sample_rate)
-        karaoke = as_audio(inst + backing_wave, sample_rate)
+        if self._separator is None:
+            self._load_karaoke_separator()
+        try:
+            karaoke_separated = self._sample(self._separator, music_audio)
+        except Exception as error:
+            karaoke_separated = self._fallback_after_runtime_error(music_audio, error)
+        karaoke = as_audio(_channels(karaoke_separated[0], sample_rate, target_samples), sample_rate)
+        status = self.separation_status()
+        info = (f"{voice_info} Karaoke separator: {status['architecture']} {status['model']} "
+                f"(overlap={status['overlap']:.2f}, shifts={status['shifts']}); "
+                f"fallback={'yes' if status['fallback'] else 'no'}. "
+                "Karaoke uses only the separated instrumental; inseparable backing vocals "
+                "remain in the vocal stem rather than being mixed back.")
         return full, karaoke, info
 
 
