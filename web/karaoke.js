@@ -303,6 +303,64 @@ function hideLegacyPlannerMedia(node) {
   hideStorageWidget(widget);
 }
 
+const VOCAL_MODES = ["Legacy / separated vocal", "ACE LEGO → RVC"];
+
+function repairLegacyRendererWidgetOrder(node) {
+  if (node.comfyClass !== "ImageSongRender") return false;
+  const widgets = Object.fromEntries((node.widgets || []).map((widget) => [widget.name, widget]));
+  const vocalMode = widgets.vocal_mode;
+  if (!vocalMode) return false;
+
+  // Workflows saved before Vocal Mode was inserted have every later positional
+  // value shifted one widget to the right. Only migrate that recognizable shape.
+  const hasLegacyShift = !VOCAL_MODES.includes(vocalMode.value)
+    && Number.isFinite(Number(vocalMode.value))
+    && typeof widgets.cfg?.value === "boolean"
+    && typeof widgets.generate_audio_codes?.value === "string"
+    && /^\d+x\d+$/i.test(String(widgets.lyric_timing?.value || ""));
+  if (hasLegacyShift) {
+    const shifted = {
+      image_steps: vocalMode.value,
+      image_edit_strength: widgets.image_steps?.value,
+      identity_preservation: widgets.image_edit_strength?.value,
+      steps: widgets.identity_preservation?.value,
+      cfg: widgets.steps?.value,
+      generate_audio_codes: widgets.cfg?.value,
+      lyric_timing: widgets.generate_audio_codes?.value,
+      resolution: widgets.lyric_timing?.value,
+      filename: widgets.resolution?.value,
+    };
+    vocalMode.value = "Legacy / separated vocal";
+    for (const [name, value] of Object.entries(shifted)) {
+      if (widgets[name] && value !== undefined) widgets[name].value = value;
+    }
+  } else {
+    // A user may select a valid Vocal Mode after loading the shifted workflow.
+    // The remaining corruption still has a distinctive resolution/filename shape.
+    const hasPartiallyEditedShift = VOCAL_MODES.includes(vocalMode.value)
+      && Number(widgets.image_steps?.value) < 1
+      && Number(widgets.identity_preservation?.value) > 1
+      && /^\d+x\d+$/i.test(String(widgets.lyric_timing?.value || ""))
+      && !/^\d+x\d+$/i.test(String(widgets.resolution?.value || ""));
+    if (!hasPartiallyEditedShift) return false;
+    const knownGood = {
+      image_steps: 4,
+      image_edit_strength: 0.3,
+      identity_preservation: 0.58,
+      steps: 65,
+      cfg: 3,
+      generate_audio_codes: true,
+      lyric_timing: "auto",
+      resolution: "1280x720",
+      filename: "song",
+    };
+    for (const [name, value] of Object.entries(knownGood)) widgets[name].value = value;
+  }
+  node.setDirtyCanvas?.(true, true);
+  node.graph?.setDirtyCanvas?.(true, true);
+  return true;
+}
+
 app.registerExtension({
   name: "local.ImageMusicKaraoke",
   async beforeRegisterNodeDef(nodeType, nodeData) {
@@ -325,6 +383,25 @@ app.registerExtension({
       return;
     }
     if (nodeData.name !== "ImageSongRender") return;
+    const originalCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+      const result = originalCreated?.apply(this, arguments);
+      const vocalMode = this.widgets?.find((widget) => widget.name === "vocal_mode");
+      if (vocalMode) {
+        vocalMode.label = "Vocal Mode";
+        vocalMode.options = {
+          ...(vocalMode.options || {}),
+          values: VOCAL_MODES,
+        };
+      }
+      return result;
+    };
+    const originalConfigured = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function () {
+      const result = originalConfigured?.apply(this, arguments);
+      setTimeout(() => repairLegacyRendererWidgetOrder(this), 0);
+      return result;
+    };
     const original = nodeType.prototype.onExecuted;
     nodeType.prototype.onExecuted = function (message) {
       original?.apply(this, arguments);
@@ -367,5 +444,10 @@ app.registerExtension({
       this.setSize([Math.max(this.size[0], 500), Math.max(this.size[1], 980)]);
       this.setDirtyCanvas(true, true);
     };
+  },
+  loadedGraphNode(node) {
+    if (node.comfyClass === "ImageSongRender") {
+      setTimeout(() => repairLegacyRendererWidgetOrder(node), 0);
+    }
   },
 });
