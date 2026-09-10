@@ -6,8 +6,11 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest.mock import patch
 
-from ace_step_base import (AceStepBaseClient, BASE_MODEL, MissingBaseModelError)
+from ace_step_base import (AceStepBaseClient, AceStepBaseError,
+                           AceStepBaseRuntimeManager, BASE_MODEL,
+                           create_managed_base_client, MissingBaseModelError)
 
 
 def wav_bytes(seconds=0.25, sample_rate=8000):
@@ -79,6 +82,56 @@ class FakeSession:
         raise AssertionError(url)
 
 
+class HealthSession:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return FakeResponse({"data": {
+            "status": "ok", "service": "ACE-Step API", "models_initialized": True,
+        }, "code": 200})
+
+
+class FakeProcess:
+    def __init__(self, return_code=None):
+        self.return_code = return_code
+        self.pid = 4321
+        self.terminated = False
+
+    def poll(self):
+        return self.return_code
+
+    def terminate(self):
+        self.terminated = True
+        self.return_code = 0
+
+    def wait(self, timeout=None):
+        del timeout
+        return self.return_code
+
+    def kill(self):
+        self.terminated = True
+        self.return_code = -9
+
+
+def make_runtime(root: Path):
+    required = [
+        root / ".venv" / "Scripts" / "python.exe",
+        root / "acestep" / "api_server.py",
+        root / "checkpoints" / BASE_MODEL / "model.safetensors",
+        root / "checkpoints" / "vae" / "diffusion_pytorch_model.safetensors",
+        root / "checkpoints" / "Qwen3-Embedding-0.6B" / "model.safetensors",
+    ]
+    for path in required:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"installed")
+
+
 class AceStepBaseClientTests(unittest.TestCase):
     def test_lego_vocals_uploads_exact_track_request_and_saves_wav(self):
         session = FakeSession([BASE_MODEL], loaded_model=BASE_MODEL)
@@ -144,6 +197,73 @@ class AceStepBaseClientTests(unittest.TestCase):
         self.assertEqual(init[2]["json"], {
             "model": BASE_MODEL, "slot": 1, "init_llm": False,
         })
+
+
+class AceStepBaseRuntimeManagerTests(unittest.TestCase):
+    def test_server_already_running_is_reused_without_starting_process(self):
+        session = HealthSession([True])
+        starts = []
+        manager = AceStepBaseRuntimeManager(
+            runtime_root=Path("missing-on-purpose"),
+            popen_factory=lambda *args, **kwargs: starts.append((args, kwargs)),
+        )
+
+        result = manager.ensure_running(session)
+
+        self.assertFalse(result["started"])
+        self.assertEqual(starts, [])
+
+    def test_absent_server_is_started_once_and_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_runtime(root)
+            session = HealthSession([ConnectionError("refused"), True])
+            process = FakeProcess()
+            starts = []
+
+            def start(*args, **kwargs):
+                starts.append((args, kwargs))
+                return process
+
+            manager = AceStepBaseRuntimeManager(
+                runtime_root=root, popen_factory=start, poll_seconds=0.01,
+            )
+            first = manager.ensure_running(session)
+            second = manager.ensure_running(session)
+
+        self.assertTrue(first["started"])
+        self.assertFalse(second["started"])
+        self.assertEqual(len(starts), 1)
+        command = starts[0][0][0]
+        environment = starts[0][1]["env"]
+        self.assertEqual(command[-4:], ["--host", "127.0.0.1", "--port", "8001"])
+        self.assertEqual(environment["ACESTEP_CONFIG_PATH"], BASE_MODEL)
+        self.assertEqual(environment["ACESTEP_INIT_LLM"], "false")
+        self.assertEqual(environment["HF_HUB_OFFLINE"], "1")
+        self.assertTrue(environment["HF_MODULES_CACHE"].endswith("huggingface\\modules"))
+
+    def test_startup_failure_reports_runtime_logs_and_no_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_runtime(root)
+            session = HealthSession([ConnectionError("refused")])
+            manager = AceStepBaseRuntimeManager(
+                runtime_root=root, popen_factory=lambda *args, **kwargs: FakeProcess(17),
+                poll_seconds=0.01,
+            )
+            with self.assertRaises(AceStepBaseError) as raised:
+                manager.ensure_running(session)
+
+        message = str(raised.exception)
+        self.assertIn("exited during startup with code 17", message)
+        self.assertIn("base_api.stderr.log", message)
+        self.assertIn("No models were downloaded", message)
+
+    def test_legacy_mode_never_creates_or_starts_base_runtime(self):
+        with patch("ace_step_base.get_base_runtime_manager") as get_manager:
+            client = create_managed_base_client(False)
+        self.assertIsNone(client)
+        get_manager.assert_not_called()
 
 
 if __name__ == "__main__":

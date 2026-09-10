@@ -16,7 +16,7 @@ from .audio_pipeline import (_channels, as_audio, master_audio, mix_sfx,
                              build_sfx_schedule, strip_sfx_markers,
                              generate_described_sfx, VocalMixBackend)
 from .visual_pipeline import create_scene_images
-from .ace_step_base import (AceStepBaseClient, BASE_MODEL,
+from .ace_step_base import (AceStepBaseClient, BASE_MODEL, create_managed_base_client,
                             LEGO_VOCALS_INSTRUCTION, PREFERRED_LM_MODEL)
 
 
@@ -627,7 +627,7 @@ class ImageSongRender:
             if trained_voice_model is not None and (not isinstance(trained_voice_model, dict)
                                                      or not trained_voice_model.get("model_path")):
                 raise ValueError("The connected trained voice model is invalid or missing its .pth file.")
-            lego_client = AceStepBaseClient() if lego_mode else None
+            lego_client = create_managed_base_client(lego_mode)
             lego_reference_path = None
             lego_reference_sources = []
             if lego_mode and ace_voice_reference is not None:

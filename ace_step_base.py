@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import threading
 import time
+import atexit
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +16,7 @@ from urllib.parse import urljoin, urlparse
 BASE_MODEL = "acestep-v15-base"
 PREFERRED_LM_MODEL = "acestep-5Hz-lm-1.7B"
 LEGO_VOCALS_INSTRUCTION = "Generate the VOCALS track based on the audio context:"
+BASE_RUNTIME_ENV = "IMAGE_MUSIC_KARAOKE_ACESTEP_BASE_ROOT"
 
 
 class AceStepBaseError(RuntimeError):
@@ -21,6 +25,203 @@ class AceStepBaseError(RuntimeError):
 
 class MissingBaseModelError(AceStepBaseError):
     """The local official ACE-Step server does not have the 2B Base model."""
+
+
+class AceStepBaseRuntimeManager:
+    """Start and reuse the project's isolated official ACE-Step Base API."""
+
+    def __init__(self, server_url: str = "http://127.0.0.1:8001", *,
+                 runtime_root: Path | None = None, startup_seconds: float = 360.0,
+                 poll_seconds: float = 1.0, popen_factory=None, sleep=None,
+                 monotonic=None):
+        self.server_url = AceStepBaseClient._validate_local_url(server_url)
+        self.runtime_root = Path(runtime_root).resolve() if runtime_root else None
+        self.startup_seconds = max(5.0, float(startup_seconds))
+        self.poll_seconds = max(0.05, float(poll_seconds))
+        self.popen_factory = popen_factory or subprocess.Popen
+        self.sleep = sleep or time.sleep
+        self.monotonic = monotonic or time.monotonic
+        self._lock = threading.Lock()
+        self._process = None
+        self._shutdown_registered = False
+
+    @property
+    def health_url(self) -> str:
+        return urljoin(self.server_url + "/", "health")
+
+    def _health_ready(self, session) -> bool:
+        try:
+            response = session.get(self.health_url, timeout=3)
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict) and payload.get("code") not in (None, 200):
+                return False
+            data = payload.get("data", payload) if isinstance(payload, dict) else {}
+            return (isinstance(data, dict)
+                    and data.get("status") == "ok"
+                    and data.get("service") in (None, "ACE-Step API"))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _candidate_roots() -> list[Path]:
+        candidates = []
+        configured = os.environ.get(BASE_RUNTIME_ENV, "").strip()
+        if configured:
+            candidates.append(Path(configured).expanduser())
+        module_root = Path(__file__).resolve().parent
+        candidates.append(module_root.parent / "work" / "ACE-Step-1.5-main")
+        for documents in (Path.home() / "Documents", Path.home() / "OneDrive" / "Documents"):
+            codex = documents / "Codex"
+            if codex.is_dir():
+                candidates.extend(sorted(codex.glob("*/*/work/ACE-Step-1.5-main"), reverse=True))
+            candidates.append(documents / "ACE-Step-1.5-main")
+        unique = []
+        seen = set()
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            key = os.path.normcase(str(resolved))
+            if key not in seen:
+                seen.add(key)
+                unique.append(resolved)
+        return unique
+
+    @staticmethod
+    def _required_paths(root: Path) -> dict[str, Path]:
+        return {
+            "isolated Python": root / ".venv" / "Scripts" / "python.exe",
+            "official API module": root / "acestep" / "api_server.py",
+            "2B Base checkpoint": root / "checkpoints" / BASE_MODEL / "model.safetensors",
+            "ACE VAE": root / "checkpoints" / "vae" / "diffusion_pytorch_model.safetensors",
+            "ACE text encoder": root / "checkpoints" / "Qwen3-Embedding-0.6B" / "model.safetensors",
+        }
+
+    def _resolve_runtime(self) -> tuple[Path, dict[str, Path]]:
+        candidates = [self.runtime_root] if self.runtime_root else self._candidate_roots()
+        checked = []
+        for root in candidates:
+            if root is None:
+                continue
+            required = self._required_paths(root)
+            missing = [label for label, path in required.items()
+                       if not path.is_file() or path.stat().st_size <= 0]
+            checked.append(f"{root} ({', '.join(missing) if missing else 'complete'})")
+            if not missing:
+                return root, required
+        searched = "; ".join(checked) or "no candidate paths"
+        raise AceStepBaseError(
+            "ACE LEGO → RVC could not find the installed official ACE-Step 1.5 Base runtime "
+            f"and required local checkpoint files. Set {BASE_RUNTIME_ENV} to the ACE-Step "
+            "repository containing .venv, checkpoints/acestep-v15-base, checkpoints/vae, "
+            f"and checkpoints/Qwen3-Embedding-0.6B. Checked: {searched}. "
+            "No models were downloaded."
+        )
+
+    @staticmethod
+    def _tail(path: Path, limit: int = 6000) -> str:
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")[-limit:].strip()
+        except OSError:
+            return ""
+
+    def _stop_managed_process(self) -> None:
+        process = self._process
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=10)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+    def ensure_running(self, session, on_progress=None) -> dict:
+        with self._lock:
+            if self._health_ready(session):
+                if on_progress:
+                    on_progress(f"Reusing healthy official ACE-Step Base API at {self.server_url}")
+                return {"started": False, "server_url": self.server_url}
+
+            root, required = self._resolve_runtime()
+            if self._process is None or self._process.poll() is not None:
+                log_dir = root / ".cache" / "image_music_karaoke"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                huggingface_cache = root / ".cache" / "huggingface"
+                (huggingface_cache / "modules").mkdir(parents=True, exist_ok=True)
+                (huggingface_cache / "hub").mkdir(parents=True, exist_ok=True)
+                stdout_path = log_dir / "base_api.stdout.log"
+                stderr_path = log_dir / "base_api.stderr.log"
+                environment = os.environ.copy()
+                environment.update({
+                    "ACESTEP_CONFIG_PATH": BASE_MODEL,
+                    "ACESTEP_INIT_LLM": "false",
+                    "ACESTEP_NO_INIT": "false",
+                    "ACESTEP_API_HOST": "127.0.0.1",
+                    "ACESTEP_API_PORT": str(urlparse(self.server_url).port or 8001),
+                    "HF_HUB_OFFLINE": "1",
+                    "HF_HOME": str(huggingface_cache),
+                    "HF_MODULES_CACHE": str(huggingface_cache / "modules"),
+                    "HUGGINGFACE_HUB_CACHE": str(huggingface_cache / "hub"),
+                    "TRANSFORMERS_OFFLINE": "1",
+                    "PYTHONUNBUFFERED": "1",
+                })
+                bootstrap = Path(__file__).resolve().with_name("ace_step_base_server.py")
+                if not bootstrap.is_file():
+                    raise AceStepBaseError(
+                        f"ACE LEGO → RVC local-only API bootstrap is missing: {bootstrap}"
+                    )
+                command = [str(required["isolated Python"]), "-u", str(bootstrap),
+                           "--host", "127.0.0.1", "--port",
+                           str(urlparse(self.server_url).port or 8001)]
+                if on_progress:
+                    on_progress(f"Starting official ACE-Step 1.5 2B Base API from {root}")
+                try:
+                    with stdout_path.open("ab", buffering=0) as stdout_handle, \
+                            stderr_path.open("ab", buffering=0) as stderr_handle:
+                        self._process = self.popen_factory(
+                            command, cwd=str(root), env=environment, stdin=subprocess.DEVNULL,
+                            stdout=stdout_handle, stderr=stderr_handle,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        )
+                except Exception as exc:
+                    raise AceStepBaseError(
+                        f"ACE LEGO → RVC could not start the official Base API with "
+                        f"{required['isolated Python']}: {exc}. Runtime: {root}. "
+                        f"No models were downloaded."
+                    ) from exc
+                if not self._shutdown_registered:
+                    atexit.register(self._stop_managed_process)
+                    self._shutdown_registered = True
+            else:
+                stdout_path = root / ".cache" / "image_music_karaoke" / "base_api.stdout.log"
+                stderr_path = root / ".cache" / "image_music_karaoke" / "base_api.stderr.log"
+
+            deadline = self.monotonic() + self.startup_seconds
+            while self.monotonic() < deadline:
+                if self._health_ready(session):
+                    if on_progress:
+                        on_progress(f"Official ACE-Step Base API is ready at {self.server_url}")
+                    return {"started": True, "server_url": self.server_url,
+                            "runtime_root": str(root), "pid": getattr(self._process, "pid", None)}
+                return_code = self._process.poll()
+                if return_code is not None:
+                    detail = self._tail(stderr_path) or self._tail(stdout_path)
+                    raise AceStepBaseError(
+                        f"ACE LEGO → RVC Base API exited during startup with code {return_code}. "
+                        f"Runtime: {root}. Check {stderr_path} and {stdout_path}. "
+                        f"Last log output: {detail or 'none'}. No models were downloaded."
+                    )
+                self.sleep(self.poll_seconds)
+
+            self._stop_managed_process()
+            detail = self._tail(stderr_path) or self._tail(stdout_path)
+            raise AceStepBaseError(
+                f"ACE LEGO → RVC Base API did not become healthy at {self.server_url} within "
+                f"{self.startup_seconds:g} seconds. Runtime: {root}. Check {stderr_path} and "
+                f"{stdout_path}. Last log output: {detail or 'none'}. No models were downloaded."
+            )
 
 
 @dataclass(frozen=True)
@@ -42,10 +243,11 @@ class AceStepBaseClient:
 
     def __init__(self, server_url: str = "http://127.0.0.1:8001", *,
                  timeout_seconds: float = 3600.0, poll_seconds: float = 2.0,
-                 session=None):
+                 session=None, service_manager: AceStepBaseRuntimeManager | None = None):
         self.server_url = self._validate_local_url(server_url)
         self.timeout_seconds = max(10.0, float(timeout_seconds))
         self.poll_seconds = max(0.05, float(poll_seconds))
+        self.service_manager = service_manager
         if session is None:
             try:
                 import requests
@@ -92,7 +294,9 @@ class AceStepBaseClient:
     def _url(self, path: str) -> str:
         return urljoin(self.server_url + "/", path.lstrip("/"))
 
-    def preflight_and_load_base(self) -> dict:
+    def preflight_and_load_base(self, on_progress=None) -> dict:
+        if self.service_manager is not None:
+            self.service_manager.ensure_running(self.session, on_progress=on_progress)
         try:
             health = self.session.get(self._url("/health"), timeout=10)
             health_data = self._unwrap(health, "health check")
@@ -169,7 +373,7 @@ class AceStepBaseClient:
             if reference_wav == source_wav:
                 raise ValueError("Voice-reference audio must be separate from the instrumental source audio.")
 
-        loaded = self.preflight_and_load_base()
+        loaded = self.preflight_and_load_base(on_progress=on_progress)
         if on_progress:
             on_progress(f"Loaded {loaded.get('loaded_model', BASE_MODEL)} for LEGO vocals")
 
@@ -279,3 +483,17 @@ class AceStepBaseClient:
             output_path=output_wav, task_id=task_id, model=BASE_MODEL,
             duration=float(info.frames) / float(info.samplerate), server_item=dict(item),
         )
+
+
+_BASE_RUNTIME_MANAGER = AceStepBaseRuntimeManager()
+
+
+def get_base_runtime_manager() -> AceStepBaseRuntimeManager:
+    return _BASE_RUNTIME_MANAGER
+
+
+def create_managed_base_client(enabled: bool) -> AceStepBaseClient | None:
+    """Create the production client only when ACE LEGO mode is selected."""
+    if not enabled:
+        return None
+    return AceStepBaseClient(service_manager=get_base_runtime_manager())

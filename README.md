@@ -220,7 +220,7 @@ The renderer's `vocal_mode` selector provides two production paths:
 - **Legacy / separated vocal** is the backward-compatible default. ACE-Step XL SFT generates the complete performance. The established `htdemucs` path separates the vocal stem, sends only the lead through RVC when a trained model is connected, and uses `htdemucs_ft` for the karaoke instrumental exactly as before.
 - **ACE LEGO → RVC** asks XL SFT for the instrumental arrangement, unloads the ComfyUI models, generates an isolated `track_name="vocals"` lead with the local official ACE-Step 1.5 2B Base service, converts that clean lead through the selected Singing Voice RVC model, and remixes it directly with the instrumental. Demucs is not loaded or invoked in this mode; the generated instrumental also supplies karaoke audio.
 
-The render node's optional `ace_voice_reference` AUDIO input controls ACE-Step timbre conditioning only. It remains separate from, and does not replace, the trained `.pth`/`.index` RVC model selected in **Singing Voice**. ACE LEGO mode requires that trained RVC model. The local official Base API is expected at `http://127.0.0.1:8001`; it must already contain `acestep-v15-base`, because the integration does not download it.
+The render node's optional `ace_voice_reference` AUDIO input controls ACE-Step timbre conditioning only. It remains separate from, and does not replace, the trained `.pth`/`.index` RVC model selected in **Singing Voice**. ACE LEGO mode requires that trained RVC model. When this mode is selected, the node checks the official Base API at `http://127.0.0.1:8001`. If needed, it starts the project's existing isolated ACE-Step runtime, waits for `/health`, and reuses that process for later sections. It never starts the service in Legacy mode and never downloads missing models. Set `IMAGE_MUSIC_KARAOKE_ACESTEP_BASE_ROOT` to the official ACE-Step repository if automatic discovery cannot find it.
 
 To replace the voice later, select another `.pth`/`.index` pair in the loader. The song pipeline itself does not need to change.
 
@@ -274,8 +274,9 @@ pitch `0`, index ratio `0.75`, consonant protection `0.25`, volume envelope `0.2
 route does not run Demucs before RVC. Leaving the model disconnected preserves the earlier
 LEGO outputs and skips the two RVC-specific files.
 
-This node calls the official ACE-Step 1.5 local API at `http://127.0.0.1:8001`. Configure
-that service with the local 2B `acestep-v15-base` checkpoint. The node checks `/v1/model_inventory`
+This node calls the official ACE-Step 1.5 local API at `http://127.0.0.1:8001`. The production
+ACE LEGO mode automatically starts and reuses the existing isolated runtime when necessary.
+Configure that runtime with the local 2B `acestep-v15-base` checkpoint. The node checks `/v1/model_inventory`
 before `/v1/init` and refuses to proceed unless the Base model is already reported, so it
 cannot start an implicit model download. Start the official service in offline mode when
 you need a hard server-side guarantee as well:
