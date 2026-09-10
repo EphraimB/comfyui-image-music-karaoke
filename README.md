@@ -1,6 +1,6 @@
 # ComfyUI Image Music Karaoke
 
-`comfyui-image-music-karaoke` is a local ComfyUI custom node and workflow for directing a complete image-to-song production. It plans a structured song, generates sectioned music with ComfyUI's native ACE-Step 1.5 nodes, produces a coordinated still-image scene sequence, optionally converts only the separated lead vocal to an RVC voice, mixes uploaded or described sound effects, aligns lyrics, and exports:
+`comfyui-image-music-karaoke` is a local ComfyUI custom node and workflow for directing a complete image-to-song production. It plans a structured song, generates sectioned music with ComfyUI's native ACE-Step 1.5 nodes, produces a coordinated still-image scene sequence, optionally converts either a separated lead or a clean ACE-Step Base LEGO lead to an RVC voice, mixes uploaded or described sound effects, aligns lyrics, and exports:
 
 - `song.flac` — lossless full mix
 - `song.mp3` — MP3 full mix
@@ -50,7 +50,7 @@ Use a current ComfyUI build containing the native ACE-Step 1.5 node types, inclu
 
 The workflow also uses these custom-node projects:
 
-1. [ComfyUI_Demucs](https://github.com/smthemex/ComfyUI_Demucs) for instrumental/vocal separation. This is required for both the full and karaoke mixes.
+1. [ComfyUI_Demucs](https://github.com/smthemex/ComfyUI_Demucs) for the legacy instrumental/vocal separation path. It remains required when using **Legacy / separated vocal**.
 2. [TTS Audio Suite](https://github.com/diodiogod/TTS-Audio-Suite) for the optional trained RVC voice loader/converter and optional neural sound-effect engine. The included workflow contains its `LoadRVCModelNode` as a disconnected placeholder.
 
 The `PreviewAny` and `MarkdownNote` utility nodes shown in the included workflow must also be available. If your ComfyUI installation does not have them, remove those display-only nodes; they do not participate in generation.
@@ -167,7 +167,7 @@ ComfyUI/models/TTS/RVC/.index/YOUR_TRAINED_VOICE.index
 
 It also supports the legacy `ComfyUI/models/RVC` path and custom paths configured through `extra_model_paths.yaml`. The `.index` file is optional. The pipeline selects the `content-vec-best` HuBERT model; TTS Audio Suite can download it into `ComfyUI/models/TTS/hubert/` when first used.
 
-The public workflow deliberately contains the placeholder `local:YOUR_TRAINED_VOICE.pth` and leaves the voice node disconnected. After copying your own model outside the repository, restart ComfyUI, select it in **Optional trained singing voice**, and connect `rvc_model` to the render node's `trained_voice_model` input.
+The public workflow deliberately contains the placeholder `local:YOUR_TRAINED_VOICE.pth`. After copying your own model outside the repository, restart ComfyUI and select it in **3. Singing Voice (optional)**. Its `rvc_model` output is connected to the render node's `trained_voice_model` input in the bundled workflow.
 
 ### Optional neural SFX model
 
@@ -215,7 +215,12 @@ SFX are normalized and mixed into both the full and karaoke arrangements before 
 
 ## Trained singing voice
 
-ACE-Step first generates the complete musical performance. The established `htdemucs` voice path separates the vocal stem when RVC is connected. That vocal stem is divided into lead and backing components; only the lead is sent through RVC, then recombined for the full song exactly as before. A separate `htdemucs_ft` pass supplies only the karaoke instrumental. The instrumental is never sent through voice conversion.
+The renderer's `vocal_mode` selector provides two production paths:
+
+- **Legacy / separated vocal** is the backward-compatible default. ACE-Step XL SFT generates the complete performance. The established `htdemucs` path separates the vocal stem, sends only the lead through RVC when a trained model is connected, and uses `htdemucs_ft` for the karaoke instrumental exactly as before.
+- **ACE LEGO → RVC** asks XL SFT for the instrumental arrangement, unloads the ComfyUI models, generates an isolated `track_name="vocals"` lead with the local official ACE-Step 1.5 2B Base service, converts that clean lead through the selected Singing Voice RVC model, and remixes it directly with the instrumental. Demucs is not loaded or invoked in this mode; the generated instrumental also supplies karaoke audio.
+
+The render node's optional `ace_voice_reference` AUDIO input controls ACE-Step timbre conditioning only. It remains separate from, and does not replace, the trained `.pth`/`.index` RVC model selected in **Singing Voice**. ACE LEGO mode requires that trained RVC model. The local official Base API is expected at `http://127.0.0.1:8001`; it must already contain `acestep-v15-base`, because the integration does not download it.
 
 To replace the voice later, select another `.pth`/`.index` pair in the loader. The song pipeline itself does not need to change.
 
@@ -250,8 +255,9 @@ The frontend extension adds output cards for the FLAC, MP3, music video, and kar
 
 The optional **ACE-Step Base — LEGO Lead Vocal (Milestone)** node accepts an existing
 instrumental as ComfyUI `AUDIO` and saves a separate `lead_vocal.wav`. It is intentionally
-disconnected from the bundled workflow and does not alter the established XL SFT, Demucs,
-RVC, karaoke, mastering, SFX, video, or export paths.
+kept as a standalone inspection node. The production renderer now reuses the same Base
+client, clean-vocal RVC converter, and direct-remix implementation when its `vocal_mode`
+is **ACE LEGO → RVC**.
 
 The optional `voice_reference` input uses ACE-Step's official `reference_audio` timbre
 conditioning while the instrumental remains the separate LEGO `src_audio`. A normal

@@ -20,6 +20,10 @@ from .ace_step_base import (AceStepBaseClient, BASE_MODEL,
                             LEGO_VOCALS_INSTRUCTION, PREFERRED_LM_MODEL)
 
 
+LEGACY_VOCAL_MODE = "Legacy / separated vocal"
+ACE_LEGO_RVC_MODE = "ACE LEGO → RVC"
+
+
 def parse_duration(value):
     """Accept seconds, MM:SS, or HH:MM:SS without a fixed song-length ceiling."""
     text = str(value).strip()
@@ -454,6 +458,7 @@ class ImageSongRender:
             "image_t5": (folder_paths.get_filename_list("text_encoders"), {"default": "t5xxl_fp16.safetensors"}),
             "image_vae": (folder_paths.get_filename_list("vae"), {"default": "ae.safetensors"}),
             "visual_treatment": (["identity-preserving reference edits", "use supplied references unchanged"],),
+            "vocal_mode": ([LEGACY_VOCAL_MODE, ACE_LEGO_RVC_MODE], {"default": LEGACY_VOCAL_MODE}),
             "image_steps": ("INT", {"default": 4, "min": 1, "max": 50}),
             "image_edit_strength": ("FLOAT", {"default": 0.30, "min": 0.08, "max": 0.45, "step": 0.02}),
             "identity_preservation": ("FLOAT", {"default": 0.58, "min": 0.35, "max": 0.80, "step": 0.05,
@@ -466,6 +471,8 @@ class ImageSongRender:
             "filename": ("STRING", {"default": "song"}),
         }, "optional": {
             "trained_voice_model": ("RVC_MODEL",),
+            "ace_voice_reference": ("AUDIO", {"tooltip":
+                "Optional ACE-Step timbre reference. This is separate from the trained RVC model."}),
             "sfx_engine": ("TTS_ENGINE", {"tooltip": "Optional compatible local sound-effect engine, such as MOSS v2."}),
         }}
 
@@ -480,7 +487,8 @@ class ImageSongRender:
                image_model, image_clip, image_t5, image_vae, visual_treatment,
                image_steps, image_edit_strength, identity_preservation, steps, cfg,
                generate_audio_codes, lyric_timing, resolution, filename,
-               trained_voice_model=None, sfx_engine=None):
+               vocal_mode=LEGACY_VOCAL_MODE, trained_voice_model=None,
+               ace_voice_reference=None, sfx_engine=None):
         import torch
         import soundfile as sf
         import comfy.model_management as mm
@@ -489,6 +497,15 @@ class ImageSongRender:
         plan = song_plan
         if not plan.get("segments"):
             raise ValueError("The song plan has no sections. Run the planner again.")
+        if vocal_mode not in {LEGACY_VOCAL_MODE, ACE_LEGO_RVC_MODE}:
+            raise ValueError(f"Unknown vocal mode: {vocal_mode}")
+        lego_mode = vocal_mode == ACE_LEGO_RVC_MODE
+        if lego_mode and (not isinstance(trained_voice_model, dict)
+                          or not trained_voice_model.get("model_path")):
+            raise ValueError(
+                "ACE LEGO → RVC mode requires a trained model from the Singing Voice node. "
+                "ACE voice-reference audio is optional and does not replace that RVC model."
+            )
         check_cancel()
         job = new_job(plan["job_dir"])
         segment_dir = job / "sections"
@@ -499,9 +516,11 @@ class ImageSongRender:
                                image_model, image_clip, image_t5, image_vae],
                     "settings": {"steps": steps, "cfg": cfg, "sampler": "euler", "scheduler": "simple",
                                  "shift": 6.0, "visual_treatment": visual_treatment,
+                                 "vocal_mode": vocal_mode,
                                  "image_steps": image_steps, "image_edit_strength": image_edit_strength,
                                  "identity_preservation": identity_preservation,
                                  "voice_conversion": bool(trained_voice_model),
+                                 "ace_voice_reference": ace_voice_reference is not None,
                                  "sound_effects": len(plan.get("sfx_entries") or [])},
                     "segments": [], "scenes": []}
         manifest_path = job / "generation.json"
@@ -540,9 +559,15 @@ class ImageSongRender:
                 generate_seconds = max(10.0, duration)
                 section_seed = (int(plan.get("seed", 0)) + index) % (2 ** 64)
                 report(f"Generating ACE-Step section {index + 1}/{len(plan['segments'])}: {duration:g} seconds")
+                section_tags = plan["tags"]
+                section_lyrics = strip_sfx_markers(item["lyrics"])
+                if lego_mode:
+                    section_tags = (f"{section_tags}, instrumental arrangement, no lead vocal, "
+                                    "no singing, accompaniment only")
+                    section_lyrics = "[Instrumental]"
                 with torch.inference_mode():
-                    positive = invoke("TextEncodeAceStepAudio1.5", clip=clip, tags=plan["tags"],
-                                      lyrics=strip_sfx_markers(item["lyrics"]), seed=section_seed,
+                    positive = invoke("TextEncodeAceStepAudio1.5", clip=clip, tags=section_tags,
+                                      lyrics=section_lyrics, seed=section_seed,
                                       bpm=int(plan.get("bpm", 120)), duration=generate_seconds,
                                       timesignature="4", language=plan.get("language", "en"),
                                       keyscale=plan.get("keyscale", "E minor"),
@@ -563,7 +588,9 @@ class ImageSongRender:
                 sf.write(path, waveform[:, :target_samples].T.numpy(), rate, format="FLAC", subtype="PCM_24")
                 manifest["segments"].append({"audio_path": str(path), "raw_audio_path": str(path),
                                              "lyrics": item["lyrics"], "duration": duration,
-                                             "seed": section_seed, "sample_rate": rate})
+                                             "seed": section_seed, "sample_rate": rate,
+                                             "generation_role": ("instrumental for ACE Base LEGO vocals"
+                                                                 if lego_mode else "legacy full mix")})
                 save_manifest()
                 del waveform, audio, sampled, latent, positive, negative
                 progress.update_absolute(index + 1)
@@ -600,18 +627,90 @@ class ImageSongRender:
             if trained_voice_model is not None and (not isinstance(trained_voice_model, dict)
                                                      or not trained_voice_model.get("model_path")):
                 raise ValueError("The connected trained voice model is invalid or missing its .pth file.")
+            lego_client = AceStepBaseClient() if lego_mode else None
+            lego_reference_path = None
+            lego_reference_sources = []
+            if lego_mode and ace_voice_reference is not None:
+                lego_reference_path, lego_reference_sources = _save_voice_reference(
+                    ace_voice_reference, job)
+            if lego_mode:
+                manifest["settings"]["ace_lego"] = {
+                    "model": BASE_MODEL,
+                    "task_type": "lego",
+                    "track_name": "vocals",
+                    "inference_steps": 50,
+                    "guidance_scale": 7.0,
+                    "server_url": lego_client.server_url,
+                    "reference_audio": (str(lego_reference_path)
+                                        if lego_reference_path is not None else None),
+                    "reference_sources": lego_reference_sources,
+                    "demucs_invoked": False,
+                }
+                save_manifest()
 
             for index, item in enumerate(manifest["segments"]):
                 check_cancel()
                 samples, rate = sf.read(item["raw_audio_path"], dtype="float32", always_2d=True)
                 original = as_audio(torch.from_numpy(samples.T.copy()), int(rate))
                 target_samples = round(float(item["duration"]) * int(rate))
-                report(f"Separating a clean karaoke instrumental for section {index + 1}/{len(manifest['segments'])}")
-                full, karaoke, voice_info = voice_backend.process(original, sample_rate=int(rate),
-                                                                  target_samples=target_samples)
+                if lego_mode:
+                    report(f"Generating ACE-Step Base LEGO lead vocal for section {index + 1}/{len(manifest['segments'])}")
+                    source_path = segment_dir / f"section_{index + 1:05d}_lego_instrumental.wav"
+                    vocal_path = segment_dir / f"section_{index + 1:05d}_lego_vocal.wav"
+                    sf.write(source_path, _channels(original, int(rate), target_samples).T.numpy(),
+                             int(rate), format="WAV", subtype="PCM_24")
+                    lego_result = lego_client.generate_lego_vocals(
+                        source_path, vocal_path,
+                        caption=(f"{plan['tags']}. Expressive clear lead singing that follows "
+                                 "the supplied instrumental and preserves the planned song style."),
+                        lyrics=strip_sfx_markers(item["lyrics"]),
+                        vocal_language=plan.get("language", "en"), seed=int(item["seed"]),
+                        inference_steps=50, guidance_scale=7.0,
+                        reference_wav=lego_reference_path, on_progress=report)
+                    vocal_samples, vocal_rate = sf.read(
+                        lego_result.output_path, dtype="float32", always_2d=True)
+                    rate = int(vocal_rate)
+                    target_samples = round(float(item["duration"]) * rate)
+                    original = as_audio(_channels(original, rate, target_samples), rate)
+                    lego_vocal = as_audio(torch.from_numpy(vocal_samples.T.copy()), rate)
+                    full, karaoke, converted_vocal, voice_info = voice_backend.process_clean_vocal(
+                        original, lego_vocal, sample_rate=rate, target_samples=target_samples)
+                    converted_path = segment_dir / f"section_{index + 1:05d}_lego_rvc.wav"
+                    sf.write(converted_path,
+                             _channels(converted_vocal, rate, target_samples).T.numpy(), rate,
+                             format="WAV", subtype="PCM_24")
+                    item["ace_lego"] = {
+                        "model": lego_result.model,
+                        "task_type": "lego",
+                        "track_name": "vocals",
+                        "task_id": lego_result.task_id,
+                        "source_audio": str(source_path),
+                        "raw_vocal_path": str(vocal_path),
+                        "rvc_vocal_path": str(converted_path),
+                        "duration": lego_result.duration,
+                        "reference_audio": (str(lego_reference_path)
+                                            if lego_reference_path is not None else None),
+                        "fallback": False,
+                        "demucs_invoked": False,
+                    }
+                    item["karaoke_separator"] = {
+                        "architecture": "none",
+                        "model": "not invoked",
+                        "overlap": 0.0,
+                        "shifts": 0,
+                        "fallback": False,
+                        "fallback_reason": "",
+                        "karaoke_source": "ACE-generated instrumental",
+                        "backing_vocals": "No backing-vocal LEGO track is generated in this mode.",
+                    }
+                    item["lead_voice_converted"] = True
+                else:
+                    report(f"Separating a clean karaoke instrumental for section {index + 1}/{len(manifest['segments'])}")
+                    full, karaoke, voice_info = voice_backend.process(
+                        original, sample_rate=int(rate), target_samples=target_samples)
+                    item["karaoke_separator"] = voice_backend.separation_status()
+                    item["lead_voice_converted"] = bool(trained_voice_model)
                 item["voice_processing"] = voice_info
-                item["karaoke_separator"] = voice_backend.separation_status()
-                item["lead_voice_converted"] = bool(trained_voice_model)
                 cues = schedule.get(index, [])
                 for cue in cues:
                     effect = generated_effects[cue["effect_index"]]
@@ -627,13 +726,18 @@ class ImageSongRender:
                          format="FLAC", subtype="PCM_24")
                 sf.write(karaoke_path, _channels(karaoke, int(rate), target_samples).T.numpy(), int(rate),
                          format="FLAC", subtype="PCM_24")
+                processing_order = (["ACE-Step XL SFT instrumental",
+                                     "ACE-Step Base LEGO vocals",
+                                     "direct clean-vocal RVC (Demucs not invoked)"]
+                                    if lego_mode else
+                                    ["ACE-Step",
+                                     f"Demucs {item['karaoke_separator']['model']} instrumental separation",
+                                     "lead-only RVC" if trained_voice_model else "original lead"])
                 item.update(audio_path=str(full_path), karaoke_audio_path=str(karaoke_path),
                             sfx_cues=cues,
-                            processing_order=["ACE-Step",
-                                              f"Demucs {item['karaoke_separator']['model']} instrumental separation",
-                                              "lead-only RVC" if trained_voice_model else "original lead",
-                                              "SFX in both mixes" if cues else "no SFX in this section",
-                                              "separate mastering", "alignment against final full mix"])
+                            processing_order=processing_order + [
+                                "SFX in both mixes" if cues else "no SFX in this section",
+                                "separate mastering", "alignment against final full mix"])
                 save_manifest()
                 progress.update_absolute(len(plan["segments"]) + index + 1)
 
@@ -658,17 +762,23 @@ class ImageSongRender:
                 ])
                 if scene.get("fallback_reason"):
                     visual_report.append(f"  Fallback reason: {scene['fallback_reason']}")
-            separator_status = voice_backend.separation_status()
+            separator_status = manifest["segments"][0]["karaoke_separator"]
+            if lego_mode:
+                voice_report = (f"Voice mode: {ACE_LEGO_RVC_MODE}; trained lead voice from clean LEGO vocal.\n"
+                                "Karaoke source: ACE-generated instrumental; Demucs was not invoked.")
+            else:
+                voice_report = (f"Voice mode: {LEGACY_VOCAL_MODE}; "
+                                f"{'trained lead voice only' if trained_voice_model else 'original lead'}.\n"
+                                f"Karaoke separator: Demucs {separator_status['model']}; "
+                                f"fallback={'yes' if separator_status['fallback'] else 'no'}. "
+                                "Karaoke uses the instrumental stem only; backing vocals that cannot be "
+                                "separated from the lead remain excluded with the vocal stem.")
             report_text = (f"Created {len(plan['segments'])} ACE sections and {len(rendered_scenes)} visual scenes.\n"
                            f"FLAC: {outputs['flac_path']}\nMP3: {outputs['mp3_path']}\n"
                            f"Music video: {outputs['music_video_path']}\n"
                            f"Karaoke video: {outputs['karaoke_video_path']}\n"
                            f"Lyric timing: {outputs.get('timing_mode', lyric_timing)}; source is the final full mix.\n"
-                           f"Voice: {'trained lead voice only' if trained_voice_model else 'original lead'}.\n"
-                           f"Karaoke separator: Demucs {separator_status['model']}; "
-                           f"fallback={'yes' if separator_status['fallback'] else 'no'}. "
-                           "Karaoke uses the instrumental stem only; backing vocals that cannot be separated "
-                           "from the lead remain excluded with the vocal stem.\n"
+                           f"{voice_report}\n"
                            f"References: {len(plan.get('reference_assets') or [])}; SFX: {len(generated_effects)}"
                            "\n\nVisual scene report:\n" + "\n".join(visual_report))
             if separator_status["fallback_reason"]:
@@ -809,19 +919,20 @@ class AceStepBaseLegoVocals:
             samples, output_rate = sf.read(result.output_path, dtype="float32", always_2d=True)
             vocal = as_audio(torch.from_numpy(samples.T.copy()), int(output_rate))
             target_samples = int(samples.shape[0])
-            source_for_mix = _channels(instrumental, int(output_rate), target_samples)
             converted_vocal = vocal
             conversion_info = "RVC skipped because no trained voice model was connected."
             if trained_voice_model is not None:
                 report("Converting the clean ACE-Step LEGO vocal through the existing trained RVC path")
                 rvc_backend = VocalMixBackend(invoke, trained_voice_model)
-                converted_vocal, conversion_info = rvc_backend.convert_lead_vocal(
-                    vocal, sample_rate=int(output_rate), target_samples=target_samples)
+                remix, _karaoke, converted_vocal, conversion_info = rvc_backend.process_clean_vocal(
+                    instrumental, vocal, sample_rate=int(output_rate), target_samples=target_samples)
                 sf.write(converted_path,
                          _channels(converted_vocal, int(output_rate), target_samples).T.numpy(),
                          int(output_rate), format="WAV", subtype="PCM_24")
-            remix = as_audio(source_for_mix + _channels(converted_vocal, int(output_rate), target_samples),
-                             int(output_rate))
+            else:
+                source_for_mix = _channels(instrumental, int(output_rate), target_samples)
+                remix = as_audio(source_for_mix + _channels(converted_vocal, int(output_rate), target_samples),
+                                 int(output_rate))
             remix = master_audio(remix, sample_rate=int(output_rate), target_samples=target_samples)
             if trained_voice_model is not None:
                 sf.write(remix_path, _channels(remix, int(output_rate), target_samples).T.numpy(),

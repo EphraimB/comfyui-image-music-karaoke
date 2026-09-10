@@ -397,6 +397,17 @@ class VocalMixBackend:
         gain = max(0.4, min(2.5, _rms(original_wave) / max(_rms(converted_wave), 1e-5)))
         return as_audio(converted_wave * gain, sample_rate), str(conversion_info)
 
+    def process_clean_vocal(self, instrumental, lead_vocal, *, sample_rate: int,
+                            target_samples: int) -> tuple[dict, dict, dict, str]:
+        """Convert and remix an isolated lead without loading a separator."""
+        inst = _channels(instrumental, sample_rate, target_samples)
+        converted, conversion_info = self.convert_lead_vocal(
+            lead_vocal, sample_rate=sample_rate, target_samples=target_samples)
+        converted_wave = _channels(converted, sample_rate, target_samples)
+        full = as_audio(inst + converted_wave, sample_rate)
+        karaoke = as_audio(inst, sample_rate)
+        return full, karaoke, converted, conversion_info
+
     def load(self) -> None:
         if self._voice_separator is None:
             self._voice_separator = self._load_separator("htdemucs", overlap=0.25, shifts=1)
