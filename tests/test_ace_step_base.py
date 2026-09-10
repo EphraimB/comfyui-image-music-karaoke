@@ -65,7 +65,9 @@ class FakeSession:
     def post(self, url, **kwargs):
         recorded = dict(kwargs)
         if "files" in recorded:
-            recorded["files"] = {"src_audio": recorded["files"]["src_audio"][0]}
+            recorded["files"] = {
+                name: upload[0] for name, upload in recorded["files"].items()
+            }
         self.calls.append(("POST", url, recorded))
         if url.endswith("/v1/init"):
             return self.wrapped({"loaded_model": BASE_MODEL})
@@ -100,7 +102,28 @@ class AceStepBaseClientTests(unittest.TestCase):
         self.assertEqual(fields["track_name"], "vocals")
         self.assertEqual(fields["audio_format"], "wav")
         self.assertEqual(release[2]["files"]["src_audio"], "instrumental.wav")
+        self.assertNotIn("ref_audio", release[2]["files"])
         self.assertFalse(any(call[1].endswith("/v1/init") for call in session.calls))
+
+    def test_reference_voice_is_uploaded_separately_from_instrumental(self):
+        session = FakeSession([BASE_MODEL], loaded_model=BASE_MODEL)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "instrumental.wav"
+            reference = Path(directory) / "voice_reference.wav"
+            output = Path(directory) / "lead_vocal.wav"
+            source.write_bytes(wav_bytes())
+            reference.write_bytes(wav_bytes())
+            client = AceStepBaseClient(session=session, poll_seconds=0.01)
+            client.generate_lego_vocals(
+                source, output, caption="clear pop lead vocal", lyrics="Sing the light",
+                seed=42, inference_steps=50, reference_wav=reference,
+            )
+
+        release = next(call for call in session.calls if call[1].endswith("/release_task"))
+        self.assertEqual(release[2]["files"], {
+            "src_audio": "instrumental.wav",
+            "ref_audio": "voice_reference.wav",
+        })
 
     def test_missing_base_is_actionable_and_never_initializes_or_submits(self):
         session = FakeSession(["acestep-v15-xl-sft"])

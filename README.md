@@ -253,6 +253,21 @@ instrumental as ComfyUI `AUDIO` and saves a separate `lead_vocal.wav`. It is int
 disconnected from the bundled workflow and does not alter the established XL SFT, Demucs,
 RVC, karaoke, mastering, SFX, video, or export paths.
 
+The optional `voice_reference` input uses ACE-Step's official `reference_audio` timbre
+conditioning while the instrumental remains the separate LEGO `src_audio`. A normal
+ComfyUI `AUDIO` value supplies one recording; a batched/list AUDIO value may supply several.
+The node trims outer silence, selects an equal active contribution from every recording,
+and writes one 30-second composite because the official HTTP API accepts one reference
+file. ACE-Step then VAE-encodes that file and applies its global timbre encoder. With the
+input disconnected, the request retains the original milestone fields and behavior.
+
+Connect the existing TTS Audio Suite `RVC_MODEL` output to `trained_voice_model` to send
+the already-isolated LEGO lead directly through the same production RVC configuration:
+pitch `0`, index ratio `0.75`, consonant protection `0.25`, volume envelope `0.25`,
+`content-vec-best`, one refinement pass, and smart 30-second chunks. This experimental
+route does not run Demucs before RVC. Leaving the model disconnected preserves the earlier
+LEGO outputs and skips the two RVC-specific files.
+
 This node calls the official ACE-Step 1.5 local API at `http://127.0.0.1:8001`. Configure
 that service with the local 2B `acestep-v15-base` checkpoint. The node checks `/v1/model_inventory`
 before `/v1/init` and refuses to proceed unless the Base model is already reported, so it
@@ -278,12 +293,25 @@ ComfyUI models and empties the CUDA cache. Each run creates:
 ```text
 ComfyUI/output/image_music_karaoke/<job>/base_lego_vocals/
 ├── instrumental.wav
+├── voice_reference.wav       # only when reference conditioning is used
+├── voice_reference_001.wav   # one selected contribution per supplied recording
 ├── lead_vocal.wav
+├── lead_vocal_rvc.wav        # only when a trained RVC model is connected
+├── final_remix.wav           # instrumental + converted LEGO vocal
 └── lego_vocals_report.json
 ```
 
+In a controlled 10-second comparison using the same LEGO vocal in both branches, direct
+clean-stem RVC produced 1.19 dB stronger harmonic-to-residual ratio, 22% lower spectral
+flatness, and lower lyric word error than converting a Demucs-separated copy. This supports
+using the LEGO stem directly, although RVC can still introduce diction and timbre artifacts.
+
 The report records the model, task, source and output paths, generated duration, and
-fallback status. There is deliberately no alternate generator or separator fallback.
+fallback status, plus the conditioning mechanism and reference count. There is deliberately
+no alternate generator or separator fallback. Reference audio guides global acoustic
+features and timbre; it is not a guaranteed speaker-identity clone. It can also influence
+phrasing, register, and timing because ACE-Step exposes no independent timbre-strength
+control for this path.
 
 ## Privacy and repository hygiene
 

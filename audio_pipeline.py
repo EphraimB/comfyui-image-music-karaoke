@@ -373,15 +373,34 @@ class VocalMixBackend:
                                 "material is mixed back into karaoke."),
         }
 
-    def load(self) -> None:
-        if self._voice_separator is None:
-            self._voice_separator = self._load_separator("htdemucs", overlap=0.25, shifts=1)
-        if self.rvc_model is not None:
+    def _load_rvc(self) -> None:
+        if self.rvc_model is not None and self._engine is None:
             self._engine = self.call_node("RVCEngineNode", pitch=int(self.pitch), index_ratio=0.75,
                                           consonant_protection=0.25, volume_envelope=0.25,
                                           hubert_model="content-vec-best: Content Vec 768 (Recommended)",
                                           output_sample_rate=0, enable_custom_chunking=False,
                                           device="auto")[0]
+
+    def convert_lead_vocal(self, lead, *, sample_rate: int,
+                           target_samples: int) -> tuple[dict, str]:
+        """Convert an already-isolated lead through the established RVC settings."""
+        if self.rvc_model is None:
+            return as_audio(_channels(lead, sample_rate, target_samples), sample_rate), \
+                "RVC skipped because no trained voice model was connected."
+        self._load_rvc()
+        converted, conversion_info = self.call_node(
+            "UnifiedVoiceChangerNode", TTS_engine=self._engine,
+            source_audio=lead, narrator_target=self.rvc_model,
+            refinement_passes=1, max_chunk_duration=30, chunk_method="smart")[:2]
+        original_wave = _channels(lead, sample_rate, target_samples)
+        converted_wave = _channels(converted, sample_rate, target_samples)
+        gain = max(0.4, min(2.5, _rms(original_wave) / max(_rms(converted_wave), 1e-5)))
+        return as_audio(converted_wave * gain, sample_rate), str(conversion_info)
+
+    def load(self) -> None:
+        if self._voice_separator is None:
+            self._voice_separator = self._load_separator("htdemucs", overlap=0.25, shifts=1)
+        self._load_rvc()
 
     def process(self, music_audio, *, sample_rate: int,
                 target_samples: int) -> tuple[dict, dict, str]:
@@ -396,14 +415,9 @@ class VocalMixBackend:
         backing_wave = _channels(backing, sample_rate, target_samples)
         voice_info = "Original full mix retained."
         if self.rvc_model is not None:
-            converted, conversion_info = self.call_node(
-                "UnifiedVoiceChangerNode", TTS_engine=self._engine,
-                source_audio=lead, narrator_target=self.rvc_model,
-                refinement_passes=1, max_chunk_duration=30, chunk_method="smart")[:2]
-            converted_wave = _channels(converted, sample_rate, target_samples)
-            gain = max(0.4, min(2.5, _rms(lead_wave) / max(_rms(converted_wave), 1e-5)))
-            lead_wave = converted_wave * gain
-            voice_info = str(conversion_info)
+            converted, voice_info = self.convert_lead_vocal(
+                lead, sample_rate=sample_rate, target_samples=target_samples)
+            lead_wave = _channels(converted, sample_rate, target_samples)
         full = as_audio(inst + lead_wave + backing_wave, sample_rate)
         if self._separator is None:
             self._load_karaoke_separator()

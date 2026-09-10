@@ -16,7 +16,7 @@ from .audio_pipeline import (_channels, as_audio, master_audio, mix_sfx,
                              build_sfx_schedule, strip_sfx_markers,
                              generate_described_sfx, VocalMixBackend)
 from .visual_pipeline import create_scene_images
-from .ace_step_base import (AceStepBaseClient, AceStepBaseError, BASE_MODEL,
+from .ace_step_base import (AceStepBaseClient, BASE_MODEL,
                             LEGO_VOCALS_INSTRUCTION, PREFERRED_LM_MODEL)
 
 
@@ -82,6 +82,75 @@ def _save_audio(audio, path):
     rate = int(audio["sample_rate"])
     sound = _channels(audio, rate)
     sf.write(path, sound.T.numpy(), rate, format="FLAC", subtype="PCM_24")
+
+
+def _save_voice_reference(audio, job, target_rate=48000):
+    """Save one or more AUDIO batch items as one 30-second timbre reference."""
+    import soundfile as sf
+    import torch
+
+    entries = audio if isinstance(audio, (list, tuple)) else [audio]
+    clips = []
+    for entry in entries:
+        if not isinstance(entry, dict) or "waveform" not in entry:
+            raise ValueError("Voice reference must be a ComfyUI AUDIO value.")
+        waveform = entry["waveform"].detach().float().cpu()
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0).unsqueeze(0)
+        elif waveform.ndim == 2:
+            waveform = waveform.unsqueeze(0)
+        if waveform.ndim != 3:
+            raise ValueError("Voice-reference audio has an unsupported shape.")
+        for batch_item in waveform:
+            clip = _channels({
+                "waveform": batch_item.unsqueeze(0),
+                "sample_rate": int(entry["sample_rate"]),
+            }, target_rate)
+            peak = float(clip.abs().max())
+            if peak <= 1e-5:
+                raise ValueError("Voice-reference audio is silent.")
+            active = clip.abs().amax(dim=0) >= max(peak * 0.01, 1e-5)
+            indices = torch.nonzero(active, as_tuple=False).flatten()
+            clips.append(clip[:, int(indices[0]):int(indices[-1]) + 1])
+
+    if not clips:
+        raise ValueError("Voice-reference audio is empty.")
+
+    total_frames = 30 * target_rate
+    base_frames, remainder = divmod(total_frames, len(clips))
+    selected = []
+    source_paths = []
+    for index, clip in enumerate(clips):
+        wanted = base_frames + (1 if index < remainder else 0)
+        if clip.shape[-1] < wanted:
+            repeats = math.ceil(wanted / clip.shape[-1])
+            segment = clip.repeat(1, repeats)[:, :wanted]
+        elif clip.shape[-1] == wanted:
+            segment = clip
+        else:
+            energy = clip.square().mean(dim=0)
+            prefix = torch.cat((torch.zeros(1), torch.cumsum(energy, dim=0)))
+            stride = max(1, target_rate // 4)
+            starts = torch.arange(0, clip.shape[-1] - wanted + 1, stride)
+            if starts[-1] != clip.shape[-1] - wanted:
+                starts = torch.cat((starts, torch.tensor([clip.shape[-1] - wanted])))
+            window_energy = prefix[starts + wanted] - prefix[starts]
+            start = int(starts[int(torch.argmax(window_energy))])
+            segment = clip[:, start:start + wanted]
+        fade = min(target_rate // 100, segment.shape[-1] // 2)
+        if fade:
+            ramp = torch.linspace(0.0, 1.0, fade)
+            segment[:, :fade] *= ramp
+            segment[:, -fade:] *= ramp.flip(0)
+        source_path = job / f"voice_reference_{index + 1:03d}.wav"
+        sf.write(source_path, segment.T.numpy(), target_rate, format="WAV", subtype="PCM_24")
+        source_paths.append(str(source_path))
+        selected.append(segment)
+
+    composite = torch.cat(selected, dim=-1)[:, :total_frames]
+    composite_path = job / "voice_reference.wav"
+    sf.write(composite_path, composite.T.numpy(), target_rate, format="WAV", subtype="PCM_24")
+    return composite_path, source_paths
 
 
 MEDIA_INPUTS_DEFAULT = '{"references":[],"sound_effects":[]}'
@@ -646,38 +715,73 @@ class AceStepBaseLegoVocals:
             "guidance_scale": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 15.0,
                                          "step": 0.5}),
             "server_url": ("STRING", {"default": "http://127.0.0.1:8001"}),
+        }, "optional": {
+            "voice_reference": ("AUDIO",),
+            "trained_voice_model": ("RVC_MODEL",),
         }}
 
-    RETURN_TYPES = ("AUDIO", "STRING", "STRING")
-    RETURN_NAMES = ("lead_vocal", "vocal_WAV", "generation_report")
+    RETURN_TYPES = ("AUDIO", "STRING", "STRING", "AUDIO", "AUDIO", "STRING", "STRING")
+    RETURN_NAMES = ("lead_vocal", "vocal_WAV", "generation_report",
+                    "rvc_lead_vocal", "final_remix", "rvc_vocal_WAV", "final_remix_WAV")
     FUNCTION = "generate"
     OUTPUT_NODE = True
     CATEGORY = "audio/Image Music Karaoke/ACE-Step Base"
     DESCRIPTION = ("Experimental opt-in milestone: official ACE-Step 1.5 2B Base LEGO "
-                   "track_name=vocals from an existing instrumental. It does not alter the song renderer.")
+                   "track_name=vocals from an existing instrumental, with optional reference-audio "
+                   "timbre conditioning and direct clean-stem RVC conversion. It does not alter "
+                   "the song renderer.")
 
     def generate(self, instrumental, vocal_description, lyrics, vocal_language, seed,
-                 inference_steps, guidance_scale, server_url):
+                 inference_steps, guidance_scale, server_url, voice_reference=None,
+                 trained_voice_model=None):
         import soundfile as sf
         import torch
         import comfy.model_management as mm
 
         if instrumental is None:
             raise ValueError("Connect an existing instrumental AUDIO input.")
+        if trained_voice_model is not None and (not isinstance(trained_voice_model, dict)
+                                                or not trained_voice_model.get("model_path")):
+            raise ValueError("The connected trained voice model is invalid or missing its .pth file.")
         job = new_job() / "base_lego_vocals"
         job.mkdir()
         source_path = job / "instrumental.wav"
         output_path = job / "lead_vocal.wav"
+        converted_path = job / "lead_vocal_rvc.wav"
+        remix_path = job / "final_remix.wav"
         report_path = job / "lego_vocals_report.json"
         rate = int(instrumental["sample_rate"])
         source = _channels(instrumental, rate)
         sf.write(source_path, source.T.numpy(), rate, format="WAV", subtype="PCM_24")
         source_duration = float(source.shape[-1]) / float(rate)
+        reference_path = None
+        reference_sources = []
+        if voice_reference is not None:
+            reference_path, reference_sources = _save_voice_reference(voice_reference, job)
         log = {
             "status": "starting", "model": BASE_MODEL, "task_type": "lego",
             "track_name": "vocals", "instruction": LEGO_VOCALS_INSTRUCTION,
             "source_audio": str(source_path), "output_path": str(output_path),
             "source_duration": source_duration, "duration": None,
+            "reference_conditioning": reference_path is not None,
+            "reference_audio": str(reference_path) if reference_path else None,
+            "reference_sources": reference_sources,
+            "reference_count": len(reference_sources),
+            "reference_mechanism": ("official ACE-Step reference_audio VAE latent to global timbre encoder"
+                                    if reference_path else None),
+            "rvc_requested": trained_voice_model is not None,
+            "rvc_model": (Path(trained_voice_model["model_path"]).name
+                          if trained_voice_model is not None else None),
+            "rvc_index": (Path(trained_voice_model["index_path"]).name
+                          if trained_voice_model is not None and trained_voice_model.get("index_path") else None),
+            "rvc_settings": ({"pitch": 0, "index_ratio": 0.75,
+                              "consonant_protection": 0.25, "volume_envelope": 0.25,
+                              "hubert_model": "content-vec-best", "refinement_passes": 1,
+                              "max_chunk_duration": 30, "chunk_method": "smart"}
+                             if trained_voice_model is not None else None),
+            "raw_vocal_path": str(output_path),
+            "rvc_vocal_path": str(converted_path) if trained_voice_model is not None else None,
+            "final_remix_path": str(remix_path) if trained_voice_model is not None else None,
             "preferred_lm": PREFERRED_LM_MODEL,
             "lm_used": False,
             "lm_note": "Official direct-conditioning LEGO currently bypasses the LM.",
@@ -699,23 +803,50 @@ class AceStepBaseLegoVocals:
                 source_path, output_path, caption=vocal_description, lyrics=lyrics,
                 vocal_language=vocal_language, seed=int(seed),
                 inference_steps=int(inference_steps), guidance_scale=float(guidance_scale),
+                reference_wav=reference_path,
                 on_progress=report,
             )
             samples, output_rate = sf.read(result.output_path, dtype="float32", always_2d=True)
             vocal = as_audio(torch.from_numpy(samples.T.copy()), int(output_rate))
+            target_samples = int(samples.shape[0])
+            source_for_mix = _channels(instrumental, int(output_rate), target_samples)
+            converted_vocal = vocal
+            conversion_info = "RVC skipped because no trained voice model was connected."
+            if trained_voice_model is not None:
+                report("Converting the clean ACE-Step LEGO vocal through the existing trained RVC path")
+                rvc_backend = VocalMixBackend(invoke, trained_voice_model)
+                converted_vocal, conversion_info = rvc_backend.convert_lead_vocal(
+                    vocal, sample_rate=int(output_rate), target_samples=target_samples)
+                sf.write(converted_path,
+                         _channels(converted_vocal, int(output_rate), target_samples).T.numpy(),
+                         int(output_rate), format="WAV", subtype="PCM_24")
+            remix = as_audio(source_for_mix + _channels(converted_vocal, int(output_rate), target_samples),
+                             int(output_rate))
+            remix = master_audio(remix, sample_rate=int(output_rate), target_samples=target_samples)
+            if trained_voice_model is not None:
+                sf.write(remix_path, _channels(remix, int(output_rate), target_samples).T.numpy(),
+                         int(output_rate), format="WAV", subtype="PCM_24")
             log.update(status="complete", task_id=result.task_id,
-                       duration=result.duration, server_result=result.server_item)
+                       duration=result.duration, server_result=result.server_item,
+                       rvc_used=trained_voice_model is not None,
+                       rvc_conversion_info=conversion_info)
             save_log()
             summary = (f"ACE-Step Base LEGO vocal created\nModel: {BASE_MODEL}\n"
                        f"Task: lego; track_name=vocals\nSource: {source_path}\n"
-                       f"Output: {output_path}\nDuration: {result.duration:.3f}s\nFallback: no")
+                       f"Voice reference: {reference_path or 'none'}\n"
+                       f"Raw vocal: {output_path}\n"
+                       f"RVC vocal: {converted_path if trained_voice_model is not None else 'not requested'}\n"
+                       f"Final remix: {remix_path if trained_voice_model is not None else 'not requested'}\n"
+                       f"RVC: {conversion_info}\nDuration: {result.duration:.3f}s\nFallback: no")
             report(summary.replace("\n", " | "))
-            return vocal, str(output_path), summary
-        except (AceStepBaseError, ValueError) as error:
+            return (vocal, str(output_path), summary, converted_vocal, remix,
+                    str(converted_path) if trained_voice_model is not None else "",
+                    str(remix_path) if trained_voice_model is not None else "")
+        except Exception as error:
             log.update(status="failed", error=str(error))
             save_log()
             raise RuntimeError(
-                f"ACE-Step Base LEGO vocals failed without fallback. {error} "
+                f"ACE-Step Base LEGO vocal/RVC experiment failed without fallback. {error} "
                 f"Report: {report_path}"
             ) from error
 

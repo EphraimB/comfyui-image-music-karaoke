@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -147,7 +148,8 @@ class AceStepBaseClient:
     def generate_lego_vocals(self, source_wav: Path, output_wav: Path, *,
                              caption: str, lyrics: str, vocal_language: str = "en",
                              seed: int = 0, inference_steps: int = 50,
-                             guidance_scale: float = 7.0, on_progress=None) -> LegoVocalResult:
+                             guidance_scale: float = 7.0, reference_wav: Path | None = None,
+                             on_progress=None) -> LegoVocalResult:
         source_wav = Path(source_wav).resolve()
         output_wav = Path(output_wav).resolve()
         if not source_wav.is_file():
@@ -158,6 +160,14 @@ class AceStepBaseClient:
             raise ValueError("Describe the desired lead-vocal performance.")
         if not str(lyrics).strip():
             raise ValueError("Provide the lyrics for the lead-vocal track.")
+        if reference_wav is not None:
+            reference_wav = Path(reference_wav).resolve()
+            if not reference_wav.is_file():
+                raise ValueError(f"Voice-reference WAV does not exist: {reference_wav}")
+            if reference_wav.suffix.lower() != ".wav":
+                raise ValueError("ACE-Step voice-reference conditioning requires a WAV file.")
+            if reference_wav == source_wav:
+                raise ValueError("Voice-reference audio must be separate from the instrumental source audio.")
 
         loaded = self.preflight_and_load_base()
         if on_progress:
@@ -184,10 +194,15 @@ class AceStepBaseClient:
             "repainting_end": "-1",
         }
         try:
-            with source_wav.open("rb") as handle:
+            with ExitStack() as stack:
+                source_handle = stack.enter_context(source_wav.open("rb"))
+                files = {"src_audio": (source_wav.name, source_handle, "audio/wav")}
+                if reference_wav is not None:
+                    reference_handle = stack.enter_context(reference_wav.open("rb"))
+                    files["ref_audio"] = (reference_wav.name, reference_handle, "audio/wav")
                 response = self.session.post(
                     self._url("/release_task"), data=fields,
-                    files={"src_audio": (source_wav.name, handle, "audio/wav")}, timeout=120,
+                    files=files, timeout=120,
                 )
         except Exception as exc:
             raise AceStepBaseError(f"Could not submit ACE-Step LEGO vocals task: {exc}") from exc
